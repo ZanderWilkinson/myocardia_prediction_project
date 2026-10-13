@@ -1,6 +1,6 @@
 # MCPP — Myocardia Prediction Project
 
-Place Python code in `src/mcpp/`, including an empty `__init__.py`.
+Place Python code in the `src/mcpp/` package.
 
 ## Setup
 
@@ -12,7 +12,9 @@ python3 -m ipykernel install --user --name mcpp --display-name "Python (MCPP)"
 ```
 
 In VS Code, install the Python and Jupyter extensions, open a notebook,
-and select **Python (MCPP)** from the kernel picker.
+and select **Python (MCPP)** from the kernel picker. This kernel uses the
+repository's `.venv` environment. Restart the notebook kernel after installing
+the package so it picks up the editable installation.
 
 Import the package with `import mcpp`.
 
