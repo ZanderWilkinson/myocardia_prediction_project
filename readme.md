@@ -17,3 +17,8 @@ and select **Python (MCPP)** from the kernel picker.
 Import the package with `import mcpp`.
 
 Store datasets in `data/`; this directory is ignored by Git.
+
+include data files in /data/ as
+labeled_test_data
+test_samples
+training_data

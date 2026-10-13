@@ -208,7 +208,7 @@ pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python,macos
 
-/data/
+data/*
 .venv/
 __pycache__/
 *.py[cod]
