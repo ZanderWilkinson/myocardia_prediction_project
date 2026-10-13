@@ -2,6 +2,7 @@ import numpy as np
 from pathlib import Path
 import pandas as pd
 from sklearn.model_selection import train_test_split, StratifiedKFold, KFold
+# import mcpp.visualisation as vis
 print("hello!")
 
 class DataSet():
@@ -89,6 +90,11 @@ class Patient():
         print(f"Loading {self.sample_file}")
         self.data = np.load(self.sample_file)
 
+    # def vis_cloud(self, frame_num):
+    #     vis.visualise_cloud(self, frame_num)
+
+    # def vis_heartbeat(self):
+    #     vis.visualise_heartbeat(self)
     
 
     
