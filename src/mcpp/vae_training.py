@@ -6,7 +6,8 @@ import random
 import time
 
 import numpy as np
-from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, roc_auc_score
+from sklearn.metrics import (accuracy_score, balanced_accuracy_score, classification_report,
+                             confusion_matrix, f1_score, roc_auc_score)
 from sklearn.model_selection import StratifiedKFold, train_test_split
 import torch
 from torch.utils.data import DataLoader, TensorDataset
@@ -17,7 +18,7 @@ from .vae_data import DEMOGRAPHIC_COLUMNS, PreprocessConfig, prepare_arrays
 
 @dataclass(frozen=True)
 class TrainConfig:
-    epochs: int = 60
+    epochs: int = 1
     batch_size: int = 8
     learning_rate: float = 3e-4
     weight_decay: float = 1e-3
@@ -30,6 +31,7 @@ class TrainConfig:
     seed: int = 42
     device: str = "auto"
     cpu_threads: int = 4
+    amp: bool = True  # CUDA FP16 autocast + gradient scaling; CPU/MPS stay FP32.
 
 
 @dataclass
@@ -57,22 +59,37 @@ class FoldScaler:
 
 
 def select_device(name="auto"):
-    if name != "auto":
-        return torch.device(name)
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
+    """Prefer CUDA, then MPS, then CPU; fail clearly for unavailable requests."""
+    if name == "auto":
+        name = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+    try:
+        device = torch.device(name)
+    except (RuntimeError, ValueError) as exc:
+        raise ValueError("Use auto, cpu, mps, cuda or a CUDA device index such as cuda:1.") from exc
+    if device.type not in {"cpu", "mps", "cuda"}:
+        raise ValueError("Supported training devices are cpu, mps and cuda.")
+    if device.type == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA was requested, but PyTorch cannot access an NVIDIA GPU. "
+                               "Install a CUDA-enabled PyTorch build and check the NVIDIA driver.")
+        index = torch.cuda.current_device() if device.index is None else device.index
+        if index >= torch.cuda.device_count():
+            raise ValueError(f"CUDA device {index} does not exist; detected {torch.cuda.device_count()} GPU(s).")
+        device = torch.device("cuda", index)
+    elif device.type == "mps" and not torch.backends.mps.is_available():
+        raise RuntimeError("MPS was requested, but the Apple GPU is unavailable to this process.")
+    return device
 
 
-def _loader(xyz, regions, demographics, labels, scaler, batch_size, *, seed=42, shuffle=False):
+def _loader(xyz, regions, demographics, labels, scaler, batch_size, *, seed=42,
+            shuffle=False, pin_memory=False):
     xyz, demographics = scaler.transform(xyz, demographics)
     tensors = [torch.from_numpy(np.ascontiguousarray(array)) for array in
                (xyz, np.asarray(regions, dtype=np.int64), demographics,
                 np.asarray(labels, dtype=np.int64))]
     return DataLoader(TensorDataset(*tensors), batch_size=batch_size, shuffle=shuffle,
-                      generator=torch.Generator().manual_seed(seed), num_workers=0)
+                      generator=torch.Generator().manual_seed(seed), num_workers=0,
+                      pin_memory=pin_memory)
 
 
 def _validate_arrays(xyz, regions, demographics, labels, model_config):
@@ -94,11 +111,13 @@ def predict_prepared(model, scaler, xyz, regions, demographics, *, batch_size=8,
     """Use posterior means, without decoding or stochastic latent sampling."""
     model.eval()
     device = next(model.parameters()).device if device is None else torch.device(device)
-    loader = _loader(xyz, regions, demographics, np.zeros(len(xyz), np.int64), scaler, batch_size)
+    cuda = device.type == "cuda"
+    loader = _loader(xyz, regions, demographics, np.zeros(len(xyz), np.int64), scaler,
+                     batch_size, pin_memory=cuda)
     probabilities, latents = [], []
     for coordinates, anatomy, demographic, _ in loader:
-        mu, _ = model.encode(coordinates.to(device), anatomy.to(device))
-        probabilities.append(model.classify(mu, demographic.to(device)).sigmoid().cpu().numpy())
+        mu, _ = model.encode(coordinates.to(device, non_blocking=cuda), anatomy.to(device, non_blocking=cuda))
+        probabilities.append(model.classify(mu, demographic.to(device, non_blocking=cuda)).sigmoid().cpu().numpy())
         latents.append(mu.cpu().numpy())
     return np.concatenate(probabilities), np.concatenate(latents)
 
@@ -117,6 +136,25 @@ def classification_metrics(labels, probabilities):
             **_classification_scores(labels, prediction)}
 
 
+def mi_classification_report(labels, probabilities):
+    """Report the patient MI diagnosis at cutoff .5, separately from VAE losses."""
+    labels = np.asarray(labels)
+    probabilities = np.asarray(probabilities)
+    if (labels.ndim != 1 or labels.shape != probabilities.shape or not len(labels)
+            or not np.isfinite(probabilities).all() or not np.isin(labels, [0, 1]).all()
+            or (probabilities < 0).any() or (probabilities > 1).any()):
+        raise ValueError("Supply one binary MI label and finite probability in [0, 1] per patient.")
+    prediction = probabilities >= .5
+    return {"n_patients": len(labels), "classification_threshold": .5,
+            "class_mapping": {"healthy": 0, "pMI": 1},
+            "metrics": classification_metrics(labels, probabilities),
+            "per_class": classification_report(labels, prediction, labels=[0, 1],
+                                                 target_names=["healthy", "pMI"],
+                                                 output_dict=True, zero_division=0),
+            "confusion_matrix": confusion_matrix(labels, prediction, labels=[0, 1]).tolist(),
+            "confusion_matrix_order": ["healthy", "pMI"]}
+
+
 def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indices, *,
             model_config=VAEConfig(), train_config=TrainConfig(), verbose=True):
     """Fit using only train_indices; validation selects the best MI BCE epoch.
@@ -127,6 +165,8 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
     Each epoch logs pooled patient accuracy, pMI F1 and macro F1 at cutoff 0.5.
     Training metrics use predictions collected during the training pass (dropout
     enabled); validation metrics use the epoch-end model with dropout disabled.
+    CUDA uses FP16 automatic mixed precision and gradient scaling by default;
+    the VAE loss is evaluated in FP32. Disable with TrainConfig(amp=False).
     """
     _validate_arrays(xyz, regions, demographics, labels, model_config)
     c = train_config
@@ -151,13 +191,20 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
         torch.cuda.manual_seed_all(c.seed)
     torch.set_num_threads(c.cpu_threads)
     device = select_device(c.device)
+    cuda = device.type == "cuda"
+    amp_enabled = cuda and c.amp
+    device_name = torch.cuda.get_device_name(device) if cuda else "Apple GPU (MPS)" if device.type == "mps" else "CPU"
+    if verbose:
+        print(f"Training on {device_name} ({device}); "
+              f"precision={'FP16 mixed' if amp_enabled else 'FP32'}", flush=True)
     scaler = FoldScaler.fit(xyz[train_indices], demographics[train_indices])
     def subset_loader(indices, shuffle=False):
         return _loader(xyz[indices], regions[indices], demographics[indices], labels[indices],
-                       scaler, c.batch_size, seed=c.seed, shuffle=shuffle)
+                       scaler, c.batch_size, seed=c.seed, shuffle=shuffle, pin_memory=cuda)
     train_loader, validation_loader = subset_loader(train_indices, True), subset_loader(validation_indices)
     model = CardiacVAE(model_config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=c.learning_rate, weight_decay=c.weight_decay)
+    gradient_scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     counts = np.bincount(labels[train_indices].astype(int), minlength=2)
     pos_weight = torch.tensor(counts[0] / counts[1] if c.balance_classes else 1.,
                               device=device, dtype=torch.float32)
@@ -171,18 +218,22 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
         train_targets, train_predictions = [], []
         for coordinates, anatomy, demographic, target in train_loader:
             coordinates, anatomy, demographic, target = [
-                tensor.to(device) for tensor in (coordinates, anatomy, demographic, target)]
+                tensor.to(device, non_blocking=cuda) for tensor in (coordinates, anatomy, demographic, target)]
             optimizer.zero_grad(set_to_none=True)
-            output = model(coordinates, anatomy, demographic)
+            with torch.amp.autocast("cuda", dtype=torch.float16, enabled=amp_enabled):
+                output = model(coordinates, anatomy, demographic)
             train_targets.append(target.detach().cpu().numpy())
             train_predictions.append((output["logits"].detach() >= 0).cpu().numpy())
             losses = vae_loss(output, coordinates, target, beta=beta,
                               classification_weight=c.classification_weight, pos_weight=pos_weight)
             if not torch.isfinite(losses["loss"]):
                 raise FloatingPointError("Nonfinite VAE loss; inspect inputs and learning rate.")
-            losses["loss"].backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1., error_if_nonfinite=True)
-            optimizer.step()
+            gradient_scaler.scale(losses["loss"]).backward()
+            gradient_scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1., error_if_nonfinite=not amp_enabled)
+            # GradScaler skips an overflowing FP16 step and adjusts its scale.
+            gradient_scaler.step(optimizer)
+            gradient_scaler.update()
             for key in totals:
                 totals[key] += float(losses[key].detach()) * len(target)
         model.eval()
@@ -190,12 +241,14 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
         validation_targets, validation_predictions = [], []
         with torch.inference_mode():
             for coordinates, anatomy, demographic, target in validation_loader:
-                mu, _ = model.encode(coordinates.to(device), anatomy.to(device))
-                logits = model.classify(mu, demographic.to(device))
+                with torch.amp.autocast("cuda", dtype=torch.float16, enabled=amp_enabled):
+                    mu, _ = model.encode(coordinates.to(device, non_blocking=cuda),
+                                         anatomy.to(device, non_blocking=cuda))
+                    logits = model.classify(mu, demographic.to(device, non_blocking=cuda))
                 validation_targets.append(target.numpy())
                 validation_predictions.append((logits >= 0).cpu().numpy())
                 loss = torch.nn.functional.binary_cross_entropy_with_logits(
-                    logits, target.to(device).float(), pos_weight=pos_weight)
+                    logits.float(), target.to(device, non_blocking=cuda).float(), pos_weight=pos_weight)
                 validation_bce += float(loss) * len(target)
         validation_bce /= len(validation_indices)
         if not np.isfinite(validation_bce):
@@ -229,6 +282,7 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
     model.eval()
     return model, scaler, {"best_epoch": best_epoch, "history": history,
                            "device": str(device), "parameter_count": model.parameter_count(),
+                           "device_name": device_name, "amp_enabled": amp_enabled,
                            "positive_class_weight": float(pos_weight)}
 
 

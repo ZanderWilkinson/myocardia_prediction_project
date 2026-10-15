@@ -4,6 +4,10 @@ Place Python code in the `src/mcpp/` package.
 
 ## Setup
 
+Use Python 3.12 or newer. All Python runtime and notebook dependencies, including
+PyTorch and the frame cleaner's thread-pool control, are declared in
+`pyproject.toml`.
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -48,8 +52,22 @@ Open `notebooks/vae.ipynb` with the Python (MCPP) kernel, or run:
 
 ```bash
 python -m pip install -e .
-python results/train_vae.py --epochs 60 --folds 5 --batch-size 8
+python results/train_vae.py
 ```
+
+The default command completes a **one-epoch-per-fold, five-fold** experiment on
+the development cohort. It prints overall patient-level **pMI F1 and accuracy**
+from pooled out-of-fold predictions, plus macro F1, balanced accuracy and AUC.
+Each patient is scored by a model that used that patient in neither fitting nor
+early stopping. These measure the actual healthy-versus-pMI diagnosis from the
+classification head. One epoch is an initial baseline; use `--epochs 60` later
+for a longer experiment.
+
+Every default invocation creates a fresh run directory under
+`results/vae_training/` and prints its path. `mi_classification_report.json`
+contains the overall scores, per-class precision/recall/F1, and confusion matrix;
+`mi_predictions.csv` contains each patient's true MI diagnosis, predicted
+diagnosis, pMI probability, and scoring fold. Final test patients remain held out.
 
 The default model has **10,389,281 trainable parameters**, a **20-dimensional
 Gaussian latent space**, eight attention heads, and width 384. Each cycle starts
@@ -117,10 +135,29 @@ would erase contraction and is deliberately avoided.
 Training minimizes mean XYZ MSE + `beta * mean latent KL` + binary classification
 loss. `beta` warms to 0.01 over ten epochs; AdamW, gradient clipping, training-only
 class weights and early stopping on inner validation classification loss are
-enabled. Defaults are 60 epochs, batch size 8, learning rate 0.0003 and patience
+enabled. Defaults are one epoch per fold, batch size 8, learning rate 0.0003 and patience
 10. GPU (CUDA), Apple GPU (MPS), or CPU is selected automatically when available.
 Use `--device mps` to request the Mac GPU explicitly. MPS requires GPU access;
 restricted processes can report it unavailable even on a supported Mac.
+On an NVIDIA machine, install a CUDA-enabled PyTorch build using the
+[official installation selector](https://pytorch.org/get-started/locally/), then run:
+
+```bash
+python results/train_vae.py --device cuda
+# Select another visible GPU, or disable mixed precision:
+python results/train_vae.py --device cuda:1
+python results/train_vae.py --device cuda --no-amp
+```
+
+CUDA training enables FP16 automatic mixed precision, gradient scaling, pinned
+CPU memory and nonblocking transfers. The VAE loss remains FP32 to protect its
+KL and squared-error calculations; clipping is applied after gradient unscaling.
+See [PyTorch AMP](https://docs.pytorch.org/docs/stable/amp.html).
+Device selection prefers CUDA, then MPS, then CPU; explicit unavailable GPU
+requests fail before data preparation. The selected GPU name and precision are
+printed and saved. CUDA checkpoints can also be loaded on CPU or MPS. CUDA
+hardware tests run automatically when an NVIDIA GPU is present; this Mac cannot
+execute those tests. MPS and CPU use FP32 even when `amp=True`.
 Each epoch prints training and inner-validation accuracy, pMI F1 and macro F1
 at a fixed probability cutoff of 0.5, and saves them in the fold's `history`.
 Scores pool all patients in each split instead of averaging minibatch scores.
@@ -138,7 +175,7 @@ held-out test for the eventual final evaluation.
 For a short pipeline check using the full-size model:
 
 ```bash
-python results/train_vae.py --epochs 2 --folds 2 --limit-patients 40 --batch-size 4 --output-dir results/vae_smoke_local
+python results/train_vae.py --folds 2 --limit-patients 40 --batch-size 4 --output-dir results/vae_smoke_local
 python -m unittest discover -s tests -p 'test_vae.py'
 python -m unittest discover -s tests -p 'test_pca_xgboost.py'
 ```
@@ -148,8 +185,9 @@ both XGBoost and PyTorch in one test process stalled during verification. Both
 suites pass independently; the VAE workflow does not import XGBoost.
 
 Checkpoints, per-epoch histories, fold membership, patient probabilities, latent
-means and CV metrics are saved under `results/vae_training/` (ignored by Git).
-Use a new `--output-dir` for each experiment; nonempty directories are protected.
+means and CV metrics are saved inside the selected run directory (ignored by Git
+under `results/vae_training/`). An explicit `--output-dir` must be empty;
+nonempty directories are protected.
 Latent coordinates from independently trained folds are not aligned and should
 not be pooled as one common embedding. `predict_patients` restores both model
 and preprocessing from a checkpoint:
@@ -160,6 +198,6 @@ from mcpp.vae_training import predict_patients
 # demographics is numeric (patients, 7), in the column order listed above;
 # encode sex as 0/1 using the source dataset's False/True convention.
 probabilities, latent_means, repair_audit = predict_patients(
-    "results/vae_training/fold_1.pt", raw_patient_arrays, demographics,
+    "results/vae_training/<your-run>/fold_1.pt", raw_patient_arrays, demographics,
 )
 ```

@@ -5,6 +5,9 @@ from contextlib import redirect_stdout
 from dataclasses import replace
 import io
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -18,7 +21,8 @@ from mcpp.vae import CardiacVAE, VAEConfig, vae_loss
 from mcpp.vae_data import (DEMOGRAPHIC_COLUMNS, PreprocessConfig, UnrepairableCycleError,
                            load_cohort, prepare_arrays, prepare_patient, repair_frames)
 from mcpp.vae_training import (FoldScaler, TrainConfig, cross_validate_vae, fit_vae,
-                                load_checkpoint, predict_patients, predict_prepared, save_checkpoint)
+                                load_checkpoint, predict_patients, predict_prepared, save_checkpoint,
+                                mi_classification_report, select_device)
 
 
 def cycle(points=24, seed=7):
@@ -228,6 +232,67 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(losses["reconstruction"].item(), 0)
         self.assertEqual(losses["kl"].item(), 0)
 
+    def test_half_precision_outputs_have_finite_float32_loss_and_gradients(self):
+        output = {"reconstruction": self.xyz.half().requires_grad_(),
+                  "mu": torch.full((2, 20), 300., dtype=torch.float16, requires_grad=True),
+                  "logvar": torch.full((2, 20), 8., dtype=torch.float16, requires_grad=True),
+                  "logits": torch.tensor([500., -500.], dtype=torch.float16, requires_grad=True)}
+        losses = vae_loss(output, self.xyz, torch.tensor([0, 1]))
+        self.assertEqual(losses["loss"].dtype, torch.float32)
+        self.assertTrue(all(torch.isfinite(value) for value in losses.values()))
+        expected_kl = -.5 * (1 + 8 - 300 ** 2 - np.exp(8))
+        self.assertAlmostEqual(float(losses["kl"].detach()), expected_kl, delta=.01)
+        losses["loss"].backward()
+        for value in output.values():
+            self.assertIsNotNone(value.grad)
+            self.assertTrue(torch.isfinite(value.grad).all())
+
+
+class DeviceSelectionTests(unittest.TestCase):
+    def test_auto_prefers_cuda_and_accepts_an_explicit_gpu(self):
+        with patch("torch.cuda.is_available", return_value=True), \
+             patch("torch.cuda.current_device", return_value=0), \
+             patch("torch.cuda.device_count", return_value=2):
+            self.assertEqual(str(select_device()), "cuda:0")
+            self.assertEqual(str(select_device("cuda:1")), "cuda:1")
+            with self.assertRaisesRegex(ValueError, "does not exist"):
+                select_device("cuda:2")
+
+    def test_unavailable_cuda_has_an_actionable_error(self):
+        with patch("torch.cuda.is_available", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "CUDA-enabled PyTorch"):
+                select_device("cuda")
+            with patch("torch.backends.mps.is_available", return_value=True):
+                self.assertEqual(str(select_device()), "mps")
+            with patch("torch.backends.mps.is_available", return_value=False):
+                self.assertEqual(str(select_device()), "cpu")
+                with self.assertRaisesRegex(RuntimeError, "Apple GPU"):
+                    select_device("mps")
+
+    def test_explicit_cpu_and_unsupported_devices(self):
+        self.assertEqual(str(select_device("cpu")), "cpu")
+        with self.assertRaisesRegex(ValueError, "Supported training devices"):
+            select_device("meta")
+        with self.assertRaisesRegex(ValueError, "Use auto"):
+            select_device("invalid")
+
+
+class MIReportTests(unittest.TestCase):
+    def test_report_scores_patient_mi_with_explicit_positive_class(self):
+        report = mi_classification_report([0, 0, 0, 0, 1, 1], [.1, .9, .2, .8, .7, .3])
+        self.assertEqual(report["n_patients"], 6)
+        self.assertEqual(report["metrics"]["accuracy"], .5)
+        self.assertEqual(report["metrics"]["f1_pMI"], .4)
+        self.assertEqual(report["confusion_matrix"], [[2, 2], [1, 1]])
+        self.assertEqual(report["per_class"]["healthy"]["support"], 4)
+        self.assertEqual(report["per_class"]["pMI"]["support"], 2)
+        self.assertEqual(json.loads(json.dumps(report)), report)
+
+    def test_invalid_probabilities_cannot_be_reported_as_results(self):
+        for probability in ([.1, np.nan], [.1, 1.2], [.1]):
+            with self.assertRaisesRegex(ValueError, "one binary MI label"):
+                mi_classification_report([0, 1], probability)
+
 
 class TrainingTests(unittest.TestCase):
     def setUp(self):
@@ -249,6 +314,7 @@ class TrainingTests(unittest.TestCase):
         )
         np.testing.assert_allclose(scaler.demographic_mean, self.demographics[train].mean(0))
         self.assertEqual(report["best_epoch"], 1)
+        self.assertFalse(report["amp_enabled"])  # amp=True is CUDA-only.
         expected, expected_latent = predict_prepared(model, scaler, self.xyz[:2], self.regions[:2], self.demographics[:2])
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model.pt"
@@ -319,6 +385,70 @@ class TrainingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "overlap"):
             fit_vae(self.xyz, self.regions, self.demographics, self.labels, np.arange(30), np.arange(20, 40),
                     model_config=self.model_config, train_config=self.training, verbose=False)
+
+    def test_command_defaults_to_one_epoch_and_writes_overall_mi_scores(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            data_dir, output = directory / "cohort", directory / "experiment"
+            (data_dir / "mixed_samples").mkdir(parents=True)
+            metadata = pd.DataFrame(self.demographics, columns=DEMOGRAPHIC_COLUMNS)
+            metadata["sex"] = self.labels.astype(bool)
+            metadata["MI"] = np.where(self.labels, "pMI", "healthy")
+            metadata.to_csv(data_dir / "mixed_demographics.csv", index=False)
+            for patient, label in enumerate(metadata.MI):
+                np.save(data_dir / "mixed_samples" / f"{patient}{label}.npy", cycle(points=48, seed=patient))
+            completed = subprocess.run(
+                [sys.executable, str(root / "results/train_vae.py"), "--data-dir", str(data_dir),
+                 "--output-dir", str(output), "--folds", "2", "--points", "48", "--device", "cpu"],
+                capture_output=True, text=True, timeout=60,
+                env={**os.environ, "LOKY_MAX_CPU_COUNT": "2", "OMP_NUM_THREADS": "2"},
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            cv = json.loads((output / "cv_results.json").read_text())
+            report = json.loads((output / "mi_classification_report.json").read_text())
+            predictions = pd.read_csv(output / "mi_predictions.csv")
+        self.assertEqual(cv["train_config"]["epochs"], 1)
+        self.assertTrue(all(len(f["history"]) == 1 for f in cv["folds"]))
+        self.assertEqual(report["n_patients"], 32)
+        self.assertEqual(report["epochs_per_fold"], 1)
+        self.assertFalse(report["test_set_scored"])
+        self.assertTrue(set(predictions.patient_index).isdisjoint(cv["test_patient_ids_excluded"]))
+        np.testing.assert_array_equal(predictions.true_MI, metadata.MI.iloc[predictions.patient_index])
+        expected_accuracy = accuracy_score(predictions.true_MI, predictions.predicted_MI)
+        expected_f1 = f1_score(predictions.true_MI, predictions.predicted_MI, pos_label="pMI", zero_division=0)
+        self.assertAlmostEqual(report["metrics"]["accuracy"], expected_accuracy)
+        self.assertAlmostEqual(report["metrics"]["f1_pMI"], expected_f1)
+        self.assertIn("Overall MI classification:", completed.stdout)
+        self.assertIn("F1 (pMI):", completed.stdout)
+        self.assertIn("Accuracy:", completed.stdout)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "Requires an NVIDIA CUDA GPU")
+    def test_cuda_training_with_amp_and_float32_and_portable_checkpoint(self):
+        for amp in (True, False):
+            with self.subTest(amp=amp):
+                model, scaler, report = fit_vae(
+                    self.xyz, self.regions, self.demographics, self.labels, np.arange(30), np.arange(30, 40),
+                    model_config=self.model_config,
+                    train_config=replace(self.training, device="cuda:0", amp=amp), verbose=False,
+                )
+                self.assertEqual(next(model.parameters()).device.type, "cuda")
+                self.assertEqual(report["amp_enabled"], amp)
+                for record in report["history"]:
+                    self.assertTrue(all(np.isfinite(value) for value in record.values()))
+                probability, latent = predict_prepared(
+                    model, scaler, self.xyz[:2], self.regions[:2], self.demographics[:2])
+                self.assertTrue(np.isfinite(probability).all())
+                self.assertTrue(np.isfinite(latent).all())
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "cuda.pt"
+                    save_checkpoint(path, model, scaler, preprocess_config=self.preprocess, metadata=report)
+                    cpu_model, cpu_scaler, saved = load_checkpoint(path, device="cpu")
+                    cpu_probability, cpu_latent = predict_prepared(
+                        cpu_model, cpu_scaler, self.xyz[:2], self.regions[:2], self.demographics[:2])
+                self.assertEqual(saved["metadata"]["amp_enabled"], amp)
+                np.testing.assert_allclose(cpu_probability, probability, atol=1e-4, rtol=1e-4)
+                np.testing.assert_allclose(cpu_latent, latent, atol=1e-4, rtol=1e-4)
 
 
 if __name__ == "__main__":

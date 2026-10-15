@@ -128,11 +128,13 @@ def vae_loss(output, xyz, labels, *, beta=.01, classification_weight=1., pos_wei
     silently change strength with point count. Warm beta during early training.
     The head uses mu for stable classification while reconstruction samples z.
     """
-    reconstruction = F.mse_loss(output["reconstruction"], xyz)
-    mu, logvar = output["mu"], output["logvar"]
+    # FP16 squaring/exp can overflow well before the true loss becomes large.
+    # Keep these reductions in FP32 even when the model uses CUDA autocast.
+    reconstruction = F.mse_loss(output["reconstruction"].float(), xyz.float())
+    mu, logvar = output["mu"].float(), output["logvar"].float()
     kl = -.5 * (1 + logvar - mu.square() - logvar.exp()).mean()
     classification = F.binary_cross_entropy_with_logits(
-        output["logits"], labels.float(), pos_weight=pos_weight,
+        output["logits"].float(), labels.float(), pos_weight=pos_weight,
     )
     return {"loss": reconstruction + beta * kl + classification_weight * classification,
             "reconstruction": reconstruction, "kl": kl, "classification": classification}
