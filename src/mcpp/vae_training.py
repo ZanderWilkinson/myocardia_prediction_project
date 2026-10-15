@@ -1,4 +1,4 @@
-"""Fresh-fold VAE fitting, train-only scaling, checkpoints and raw-array inference."""
+"""Resumable patient-fold VAE fitting, train-only scaling and raw-array inference."""
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -9,11 +9,15 @@ import numpy as np
 from sklearn.metrics import (accuracy_score, balanced_accuracy_score, classification_report,
                              confusion_matrix, f1_score, roc_auc_score)
 from sklearn.model_selection import StratifiedKFold, train_test_split
+from filelock import Timeout
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from .vae import CardiacVAE, VAEConfig, vae_loss
 from .vae_data import DEMOGRAPHIC_COLUMNS, PreprocessConfig, prepare_arrays
+from .vae_experiments import (array_signature, atomic_json_save, atomic_torch_save,
+                              begin_invocation, capture_rng, experiment_lock,
+                              restore_rng, training_identity)
 
 
 @dataclass(frozen=True)
@@ -32,6 +36,7 @@ class TrainConfig:
     device: str = "auto"
     cpu_threads: int = 4
     amp: bool = True  # CUDA FP16 autocast + gradient scaling; CPU/MPS stay FP32.
+    checkpoint_every: int = 100
 
 
 @dataclass
@@ -56,6 +61,11 @@ class FoldScaler:
     def state(self):
         return {"xyz_scale": self.xyz_scale, "demographic_mean": self.demographic_mean.tolist(),
                 "demographic_std": self.demographic_std.tolist()}
+
+    @classmethod
+    def from_state(cls, state):
+        return cls(state["xyz_scale"], np.asarray(state["demographic_mean"], np.float32),
+                   np.asarray(state["demographic_std"], np.float32))
 
 
 def select_device(name="auto"):
@@ -156,10 +166,12 @@ def mi_classification_report(labels, probabilities):
 
 
 def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indices, *,
-            model_config=VAEConfig(), train_config=TrainConfig(), verbose=True):
+            model_config=VAEConfig(), train_config=TrainConfig(), verbose=True,
+            checkpoint_path=None, checkpoint_context=None):
     """Fit using only train_indices; validation selects the best MI BCE epoch.
 
-    A fresh model, optimizer, class weight and scaler are created on every call.
+    New folds initialize their own model, optimizer, class weight and scaler;
+    matching checkpoints restore the fold's saved training state.
     Validation loss uses the same train-derived class weight. Returned model is
     restored to its best epoch. Never pass an outer scoring fold as validation.
     Each epoch logs pooled patient accuracy, pMI F1 and macro F1 at cutoff 0.5.
@@ -167,12 +179,16 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
     enabled); validation metrics use the epoch-end model with dropout disabled.
     CUDA uses FP16 automatic mixed precision and gradient scaling by default;
     the VAE loss is evaluated in FP32. Disable with TrainConfig(amp=False).
+    If checkpoint_path exists, resume full training state to the absolute epoch
+    target train_config.epochs. Replace that rolling checkpoint every 100 epochs
+    by default, and at invocation end or early stopping. Return the best model;
+    the rolling checkpoint retains the latest weights for continued training.
     """
     _validate_arrays(xyz, regions, demographics, labels, model_config)
     c = train_config
     if (c.epochs < 1 or c.batch_size < 1 or c.patience < 1 or c.learning_rate <= 0
             or c.weight_decay < 0 or c.beta < 0 or c.classification_weight <= 0
-            or c.kl_warmup_epochs < 0 or c.cpu_threads < 1):
+            or c.kl_warmup_epochs < 0 or c.cpu_threads < 1 or c.checkpoint_every < 1):
         raise ValueError("Invalid training settings.")
     train_indices, validation_indices = np.asarray(train_indices), np.asarray(validation_indices)
     for indices in (train_indices, validation_indices):
@@ -197,7 +213,20 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
     if verbose:
         print(f"Training on {device_name} ({device}); "
               f"precision={'FP16 mixed' if amp_enabled else 'FP32'}", flush=True)
-    scaler = FoldScaler.fit(xyz[train_indices], demographics[train_indices])
+    checkpoint_path = Path(checkpoint_path) if checkpoint_path is not None else None
+    context, saved = None, None
+    if checkpoint_path is not None:
+        context = {"model_config": asdict(model_config), "training": training_identity(c),
+                   "inputs": array_signature(xyz, regions, demographics, labels),
+                   "train_indices": train_indices.tolist(), "validation_indices": validation_indices.tolist(),
+                   "extra": checkpoint_context}
+        if checkpoint_path.exists():
+            saved = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+            if saved.get("checkpoint_version") != 1 or saved.get("context") != context:
+                raise ValueError("Checkpoint does not match the model, training settings, patient data or split.")
+            if saved["epoch"] > c.epochs:
+                raise ValueError("Requested epoch target is earlier than the saved checkpoint.")
+    scaler = FoldScaler.from_state(saved["scaler"]) if saved else FoldScaler.fit(xyz[train_indices], demographics[train_indices])
     def subset_loader(indices, shuffle=False):
         return _loader(xyz[indices], regions[indices], demographics[indices], labels[indices],
                        scaler, c.batch_size, seed=c.seed, shuffle=shuffle, pin_memory=cuda)
@@ -209,8 +238,21 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
     pos_weight = torch.tensor(counts[0] / counts[1] if c.balance_classes else 1.,
                               device=device, dtype=torch.float32)
     best_loss, best_state, best_epoch, stale = float("inf"), None, 0, 0
-    history = []
-    for epoch in range(1, c.epochs + 1):
+    history, last_epoch, start_epoch = [], 0, 0
+    if saved is not None:
+        model.load_state_dict(saved["state_dict"])
+        optimizer.load_state_dict(saved["optimizer"])
+        if amp_enabled and saved["gradient_scaler"]:
+            gradient_scaler.load_state_dict(saved["gradient_scaler"])
+        best_loss, best_state = saved["best_loss"], saved["best_state_dict"]
+        best_epoch, stale = saved["best_epoch"], saved["stale"]
+        history, last_epoch = saved["history"], saved["epoch"]
+        restore_rng(saved["rng"], device, train_loader, validation_loader)
+        start_epoch = last_epoch
+        if verbose:
+            print(f"Resuming saved epoch {last_epoch}; target {c.epochs}; best epoch {best_epoch}.", flush=True)
+    target_epoch = last_epoch if stale >= c.patience else c.epochs
+    for epoch in range(last_epoch + 1, target_epoch + 1):
         started = time.monotonic()
         beta = c.beta * min(1., epoch / max(1, c.kl_warmup_epochs))
         model.train()
@@ -276,6 +318,18 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
             best_state = {key: tensor.detach().cpu().clone() for key, tensor in model.state_dict().items()}
         else:
             stale += 1
+        last_epoch = epoch
+        if checkpoint_path is not None and (
+            epoch % c.checkpoint_every == 0 or epoch == target_epoch or stale >= c.patience
+        ):
+            atomic_torch_save({
+                "checkpoint_version": 1, "context": context, "model_config": asdict(model_config),
+                "state_dict": model.state_dict(), "optimizer": optimizer.state_dict(),
+                "gradient_scaler": gradient_scaler.state_dict(), "scaler": scaler.state(),
+                "epoch": epoch, "history": history, "best_loss": best_loss,
+                "best_state_dict": best_state, "best_epoch": best_epoch, "stale": stale,
+                "rng": capture_rng(device, train_loader, validation_loader),
+            }, checkpoint_path)
         if stale >= c.patience:
             break
     model.load_state_dict(best_state)
@@ -283,6 +337,8 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
     return model, scaler, {"best_epoch": best_epoch, "history": history,
                            "device": str(device), "parameter_count": model.parameter_count(),
                            "device_name": device_name, "amp_enabled": amp_enabled,
+                           "completed_epochs": last_epoch, "epochs_this_invocation": last_epoch - start_epoch,
+                           "early_stopped": stale >= c.patience,
                            "positive_class_weight": float(pos_weight)}
 
 
@@ -290,7 +346,7 @@ def save_checkpoint(path, model, scaler, *, preprocess_config=PreprocessConfig()
     """Save inference weights together with every transform and ordered schema."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"model_config": asdict(model.config), "scaler": scaler.state(),
+    atomic_torch_save({"model_config": asdict(model.config), "scaler": scaler.state(),
                 "preprocess_config": asdict(preprocess_config),
                 "demographic_columns": list(DEMOGRAPHIC_COLUMNS),
                 "class_mapping": {"healthy": 0, "pMI": 1}, "metadata": metadata or {},
@@ -302,9 +358,7 @@ def load_checkpoint(path, *, device="auto"):
     model = CardiacVAE(VAEConfig(**saved["model_config"]))
     model.load_state_dict(saved["state_dict"])
     model.to(select_device(device)).eval()
-    scaling = saved["scaler"]
-    scaler = FoldScaler(scaling["xyz_scale"], np.asarray(scaling["demographic_mean"], np.float32),
-                        np.asarray(scaling["demographic_std"], np.float32))
+    scaler = FoldScaler.from_state(saved["scaler"])
     return model, scaler, saved
 
 
@@ -321,10 +375,29 @@ def predict_patients(checkpoint, arrays, demographics, *, device="auto", batch_s
     return probability, latent, audit
 
 
-def cross_validate_vae(xyz, regions, demographics, labels, *, n_splits=5,
+def cross_validate_vae(xyz, regions, demographics, labels, *, output_dir=None,
+                       experiment_name="default", run_lock=None, **kwargs):
+    """Run/resume named CV. train_config.epochs adds epochs to each saved fold.
+
+    Matching data/configuration resumes automatically; an interrupted invocation
+    finishes its existing targets before another invocation can add epochs.
+    With output_dir=None, train a fresh in-memory experiment.
+    """
+    if output_dir is None:
+        return _cross_validate_vae(xyz, regions, demographics, labels, **kwargs)
+    lock = run_lock if run_lock is not None else experiment_lock(output_dir)
+    try:
+        with lock:
+            return _cross_validate_vae(xyz, regions, demographics, labels,
+                                       output_dir=Path(output_dir), experiment_name=experiment_name, **kwargs)
+    except Timeout as exc:
+        raise RuntimeError("This experiment is already being trained by another process.") from exc
+
+
+def _cross_validate_vae(xyz, regions, demographics, labels, *, n_splits=5,
                        model_config=VAEConfig(), train_config=TrainConfig(),
                        preprocess_config=PreprocessConfig(), output_dir=None, patient_ids=None,
-                       verbose=True):
+                       verbose=True, experiment_name="default"):
     """Stratified patient CV; inner holdout stops training, outer fold scores once.
 
     All supplied patients are development patients; the caller must withhold
@@ -336,9 +409,22 @@ def cross_validate_vae(xyz, regions, demographics, labels, *, n_splits=5,
         raise ValueError("Each of the two classes needs at least n_splits patients (n_splits>=2).")
     if not 0 < train_config.inner_validation_fraction < 1:
         raise ValueError("inner_validation_fraction must lie between zero and one.")
+    if train_config.epochs < 1 or train_config.checkpoint_every < 1:
+        raise ValueError("epochs and checkpoint_every must be positive.")
     patient_ids = np.arange(len(labels)) if patient_ids is None else np.asarray(patient_ids)
     if len(patient_ids) != len(labels) or len(np.unique(patient_ids)) != len(labels):
         raise ValueError("Supply exactly one unique patient ID per cycle.")
+    manifest = None
+    if output_dir is not None:
+        identity = {"experiment_name": experiment_name, "model_config": asdict(model_config),
+                    "preprocess_config": asdict(preprocess_config), "training": training_identity(train_config),
+                    "input_signature": array_signature(xyz, regions, demographics, labels),
+                    "patient_ids": patient_ids.tolist(), "n_splits": n_splits,
+                    "demographic_columns": list(DEMOGRAPHIC_COLUMNS)}
+        manifest = begin_invocation(output_dir, identity, epochs=train_config.epochs, n_splits=n_splits)
+        if verbose:
+            print(f"Experiment {experiment_name!r}, invocation {manifest['invocation']['number']}: "
+                  f"fold epoch targets {manifest['invocation']['target_epochs']}", flush=True)
     oof = np.full(len(labels), np.nan)
     latent = np.zeros((len(labels), model_config.latent_dim), dtype=np.float32)
     folds = []
@@ -350,10 +436,14 @@ def cross_validate_vae(xyz, regions, demographics, labels, *, n_splits=5,
         )
         if verbose:
             print(f"Fold {fold}/{n_splits}: fit {len(fit)}, stop {len(stop)}, score {len(score)}", flush=True)
-        fold_config = TrainConfig(**{**asdict(train_config), "seed": train_config.seed + fold})
+        target_epochs = manifest["invocation"]["target_epochs"][fold - 1] if manifest else train_config.epochs
+        fold_config = TrainConfig(**{**asdict(train_config), "seed": train_config.seed + fold,
+                                     "epochs": target_epochs})
         model, scaler, training = fit_vae(
             xyz, regions, demographics, labels, fit, stop,
             model_config=model_config, train_config=fold_config, verbose=verbose,
+            checkpoint_path=output_dir / f"fold_{fold}.last.pt" if output_dir is not None else None,
+            checkpoint_context={"experiment_name": experiment_name, "preprocess_config": asdict(preprocess_config)},
         )
         oof[score], latent[score] = predict_prepared(
             model, scaler, xyz[score], regions[score], demographics[score],
@@ -367,13 +457,20 @@ def cross_validate_vae(xyz, regions, demographics, labels, *, n_splits=5,
             save_checkpoint(Path(output_dir) / f"fold_{fold}.pt", model, scaler,
                             preprocess_config=preprocess_config, metadata=result)
         folds.append(result)
+        if manifest is not None:
+            manifest["completed_epochs"][fold - 1] = training["completed_epochs"]
+            atomic_json_save(manifest, output_dir / "experiment.json")
         del model
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     names = folds[0]["metrics"]
+    if manifest is not None:
+        manifest["invocation"]["status"] = "complete"
+        atomic_json_save(manifest, output_dir / "experiment.json")
     return {"folds": folds, "oof_probabilities": oof, "oof_latent_means": latent,
+            "experiment_name": experiment_name, "invocation": manifest["invocation"] if manifest else None,
             "oof_metrics": classification_metrics(labels, oof),
             "mean_fold_metrics": {key: float(np.mean([f["metrics"][key] for f in folds])) for key in names},
             "std_fold_metrics": {key: float(np.std([f["metrics"][key] for f in folds], ddof=1)) for key in names}}

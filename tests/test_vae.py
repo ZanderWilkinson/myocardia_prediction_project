@@ -23,6 +23,7 @@ from mcpp.vae_data import (DEMOGRAPHIC_COLUMNS, PreprocessConfig, UnrepairableCy
 from mcpp.vae_training import (FoldScaler, TrainConfig, cross_validate_vae, fit_vae,
                                 load_checkpoint, predict_patients, predict_prepared, save_checkpoint,
                                 mi_classification_report, select_device)
+from mcpp.vae_experiments import atomic_torch_save, experiment_lock
 
 
 def cycle(points=24, seed=7):
@@ -294,6 +295,18 @@ class MIReportTests(unittest.TestCase):
                 mi_classification_report([0, 1], probability)
 
 
+class AtomicCheckpointTests(unittest.TestCase):
+    def test_failed_replacement_preserves_previous_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rolling.pt"
+            atomic_torch_save({"epoch": 100}, path)
+            with patch("mcpp.vae_experiments.torch.save", side_effect=OSError("write failed")):
+                with self.assertRaisesRegex(OSError, "write failed"):
+                    atomic_torch_save({"epoch": 200}, path)
+            self.assertEqual(torch.load(path, weights_only=True)["epoch"], 100)
+            self.assertEqual([p.name for p in path.parent.iterdir()], ["rolling.pt"])
+
+
 class TrainingTests(unittest.TestCase):
     def setUp(self):
         self.raw = [cycle(seed=i) for i in range(40)]
@@ -398,9 +411,11 @@ class TrainingTests(unittest.TestCase):
             metadata.to_csv(data_dir / "mixed_demographics.csv", index=False)
             for patient, label in enumerate(metadata.MI):
                 np.save(data_dir / "mixed_samples" / f"{patient}{label}.npy", cycle(points=48, seed=patient))
+            command = [sys.executable, str(root / "results/train_vae.py"), "--data-dir", str(data_dir),
+                       "--experiment", "resume-test", "--output-dir", str(output),
+                       "--folds", "2", "--points", "48", "--device", "cpu"]
             completed = subprocess.run(
-                [sys.executable, str(root / "results/train_vae.py"), "--data-dir", str(data_dir),
-                 "--output-dir", str(output), "--folds", "2", "--points", "48", "--device", "cpu"],
+                command,
                 capture_output=True, text=True, timeout=60,
                 env={**os.environ, "LOKY_MAX_CPU_COUNT": "2", "OMP_NUM_THREADS": "2"},
             )
@@ -408,6 +423,15 @@ class TrainingTests(unittest.TestCase):
             cv = json.loads((output / "cv_results.json").read_text())
             report = json.loads((output / "mi_classification_report.json").read_text())
             predictions = pd.read_csv(output / "mi_predictions.csv")
+            continued = subprocess.run(command, capture_output=True, text=True, timeout=60,
+                                       env={**os.environ, "LOKY_MAX_CPU_COUNT": "2", "OMP_NUM_THREADS": "2"})
+            self.assertEqual(continued.returncode, 0, continued.stdout + continued.stderr)
+            continued_cv = json.loads((output / "cv_results.json").read_text())
+            self.assertEqual([f["completed_epochs"] for f in continued_cv["folds"]], [2, 2])
+            self.assertEqual(continued_cv["invocation"]["number"], 2)
+            self.assertIn("Resuming saved epoch 1; target 2", continued.stdout)
+            self.assertEqual(sorted(p.name for p in output.glob("*.pt")),
+                             ["fold_1.last.pt", "fold_1.pt", "fold_2.last.pt", "fold_2.pt"])
         self.assertEqual(cv["train_config"]["epochs"], 1)
         self.assertTrue(all(len(f["history"]) == 1 for f in cv["folds"]))
         self.assertEqual(report["n_patients"], 32)
@@ -422,6 +446,149 @@ class TrainingTests(unittest.TestCase):
         self.assertIn("Overall MI classification:", completed.stdout)
         self.assertIn("F1 (pMI):", completed.stdout)
         self.assertIn("Accuracy:", completed.stdout)
+
+    def test_rolling_checkpoint_interval_and_exact_cpu_resume(self):
+        train, validation = np.arange(30), np.arange(30, 40)
+        config = replace(self.training, epochs=5, checkpoint_every=2)
+        model_config = replace(self.model_config, dropout=.1)
+        uninterrupted, _, full_report = fit_vae(
+            self.xyz, self.regions, self.demographics, self.labels, train, validation,
+            model_config=model_config, train_config=config, verbose=False,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "rolling.pt"
+            _, _, first = fit_vae(
+                self.xyz, self.regions, self.demographics, self.labels, train, validation,
+                model_config=model_config, train_config=replace(config, epochs=1),
+                checkpoint_path=checkpoint, verbose=False,
+            )
+            self.assertEqual(torch.load(checkpoint, weights_only=True)["epoch"], 1)
+            saved_epochs = []
+            def capture_save(value, path):
+                saved_epochs.append(value["epoch"])
+                atomic_torch_save(value, path)
+            with patch("mcpp.vae_training.atomic_torch_save", side_effect=capture_save), \
+                 patch.object(FoldScaler, "fit", side_effect=AssertionError("Scaler refitted on resume")):
+                resumed, _, resumed_report = fit_vae(
+                    self.xyz, self.regions, self.demographics, self.labels, train, validation,
+                    model_config=model_config, train_config=config,
+                    checkpoint_path=checkpoint, verbose=False,
+                )
+            self.assertEqual(saved_epochs, [2, 4, 5])
+            self.assertEqual([p.name for p in checkpoint.parent.iterdir()], ["rolling.pt"])
+            saved = torch.load(checkpoint, weights_only=True)
+            self.assertEqual(saved["epoch"], 5)
+            self.assertEqual(len(saved["history"]), 5)
+            self.assertTrue(all(int(s["step"]) == 20 for s in saved["optimizer"]["state"].values()))
+        self.assertEqual(resumed_report["completed_epochs"], 5)
+        self.assertEqual(resumed_report["epochs_this_invocation"], 4)
+        self.assertEqual(resumed_report["best_epoch"], full_report["best_epoch"])
+        self.assertEqual(first["history"][0]["beta"], resumed_report["history"][0]["beta"])
+        for actual, expected in zip(resumed_report["history"], full_report["history"]):
+            self.assertEqual({k: v for k, v in actual.items() if k != "seconds"},
+                             {k: v for k, v in expected.items() if k != "seconds"})
+        for name, expected in uninterrupted.state_dict().items():
+            torch.testing.assert_close(resumed.state_dict()[name], expected, rtol=0, atol=0)
+
+    def test_interrupted_cv_finishes_original_targets_before_adding_epochs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            kwargs = dict(n_splits=2, model_config=self.model_config, train_config=self.training,
+                          preprocess_config=self.preprocess, output_dir=directory,
+                          experiment_name="interrupted", verbose=False)
+            calls = 0
+            def interrupt_second_fold(*args, **kw):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise KeyboardInterrupt()
+                return fit_vae(*args, **kw)
+            with patch("mcpp.vae_training.fit_vae", side_effect=interrupt_second_fold):
+                with self.assertRaises(KeyboardInterrupt):
+                    cross_validate_vae(self.xyz, self.regions, self.demographics, self.labels, **kwargs)
+            manifest = json.loads((Path(directory) / "experiment.json").read_text())
+            self.assertEqual(manifest["invocation"]["status"], "running")
+            self.assertEqual(manifest["completed_epochs"], [1, 0])
+            with self.assertRaisesRegex(ValueError, "unfinished invocation"):
+                cross_validate_vae(self.xyz, self.regions, self.demographics, self.labels,
+                                   **{**kwargs, "train_config": replace(self.training, epochs=2)})
+            resumed = cross_validate_vae(self.xyz, self.regions, self.demographics, self.labels, **kwargs)
+            self.assertEqual([f["completed_epochs"] for f in resumed["folds"]], [1, 1])
+            self.assertEqual([f["epochs_this_invocation"] for f in resumed["folds"]], [0, 1])
+            continued = cross_validate_vae(self.xyz, self.regions, self.demographics, self.labels, **kwargs)
+            self.assertEqual([f["completed_epochs"] for f in continued["folds"]], [2, 2])
+            self.assertEqual(continued["invocation"]["number"], 2)
+
+    def test_named_experiment_rejects_changed_data_and_hyperparameters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            kwargs = dict(n_splits=2, model_config=self.model_config, train_config=self.training,
+                          preprocess_config=self.preprocess, output_dir=directory,
+                          experiment_name="guarded", verbose=False)
+            cross_validate_vae(self.xyz, self.regions, self.demographics, self.labels, **kwargs)
+            original = (Path(directory) / "experiment.json").read_bytes()
+            with self.assertRaisesRegex(ValueError, "settings or patient data differ"):
+                cross_validate_vae(self.xyz + 1, self.regions, self.demographics, self.labels, **kwargs)
+            with self.assertRaisesRegex(ValueError, "settings or patient data differ"):
+                cross_validate_vae(self.xyz, self.regions, self.demographics, self.labels,
+                                   **{**kwargs, "train_config": replace(self.training, learning_rate=.01)})
+            self.assertEqual((Path(directory) / "experiment.json").read_bytes(), original)
+            with experiment_lock(directory):
+                with self.assertRaisesRegex(RuntimeError, "already being trained"):
+                    cross_validate_vae(self.xyz, self.regions, self.demographics, self.labels, **kwargs)
+
+    def test_partial_epoch_interruption_resumes_the_last_checkpoint(self):
+        config = replace(self.training, epochs=5, checkpoint_every=2)
+        expected, _, expected_report = fit_vae(
+            self.xyz, self.regions, self.demographics, self.labels, np.arange(30), np.arange(30, 40),
+            model_config=self.model_config, train_config=config, verbose=False,
+        )
+        calls = 0
+        def interrupt_loss(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 10:  # Interrupt during the third epoch, after one partial update.
+                raise KeyboardInterrupt()
+            return vae_loss(*args, **kwargs)
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "rolling.pt"
+            kwargs = dict(model_config=self.model_config, train_config=config,
+                          checkpoint_path=checkpoint, verbose=False)
+            with patch("mcpp.vae_training.vae_loss", side_effect=interrupt_loss):
+                with self.assertRaises(KeyboardInterrupt):
+                    fit_vae(self.xyz, self.regions, self.demographics, self.labels,
+                            np.arange(30), np.arange(30, 40), **kwargs)
+            self.assertEqual(torch.load(checkpoint, weights_only=True)["epoch"], 2)
+            resumed, _, report = fit_vae(self.xyz, self.regions, self.demographics, self.labels,
+                                         np.arange(30), np.arange(30, 40), **kwargs)
+        self.assertEqual(report["completed_epochs"], 5)
+        self.assertEqual(report["epochs_this_invocation"], 3)
+        self.assertEqual(report["best_epoch"], expected_report["best_epoch"])
+        for name, value in expected.state_dict().items():
+            torch.testing.assert_close(resumed.state_dict()[name], value, rtol=0, atol=0)
+
+    def test_early_stopping_state_persists_across_resume(self):
+        config = replace(self.training, learning_rate=1e-9, patience=1)
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "rolling.pt"
+            kwargs = dict(model_config=self.model_config, checkpoint_path=checkpoint, verbose=False)
+            fit_vae(self.xyz, self.regions, self.demographics, self.labels,
+                    np.arange(30), np.arange(30, 40), train_config=config, **kwargs)
+            _, _, stopped = fit_vae(self.xyz, self.regions, self.demographics, self.labels,
+                                     np.arange(30), np.arange(30, 40), train_config=replace(config, epochs=5), **kwargs)
+            _, _, resumed = fit_vae(self.xyz, self.regions, self.demographics, self.labels,
+                                     np.arange(30), np.arange(30, 40), train_config=replace(config, epochs=5), **kwargs)
+        self.assertTrue(stopped["early_stopped"])
+        self.assertEqual(stopped["completed_epochs"], 2)
+        self.assertEqual(resumed["epochs_this_invocation"], 0)
+        self.assertEqual(resumed["completed_epochs"], 2)
+
+    def test_missing_resume_checkpoint_cannot_silently_reset_a_fold(self):
+        with tempfile.TemporaryDirectory() as directory:
+            kwargs = dict(n_splits=2, model_config=self.model_config, train_config=self.training,
+                          preprocess_config=self.preprocess, output_dir=directory, verbose=False)
+            cross_validate_vae(self.xyz, self.regions, self.demographics, self.labels, **kwargs)
+            (Path(directory) / "fold_1.last.pt").unlink()
+            with self.assertRaisesRegex(ValueError, "checkpoint for fold 1 is missing"):
+                cross_validate_vae(self.xyz, self.regions, self.demographics, self.labels, **kwargs)
 
     @unittest.skipUnless(torch.cuda.is_available(), "Requires an NVIDIA CUDA GPU")
     def test_cuda_training_with_amp_and_float32_and_portable_checkpoint(self):

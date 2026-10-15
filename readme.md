@@ -60,11 +60,47 @@ the development cohort. It prints overall patient-level **pMI F1 and accuracy**
 from pooled out-of-fold predictions, plus macro F1, balanced accuracy and AUC.
 Each patient is scored by a model that used that patient in neither fitting nor
 early stopping. These measure the actual healthy-versus-pMI diagnosis from the
-classification head. One epoch is an initial baseline; use `--epochs 60` later
-for a longer experiment.
+classification head. One epoch is an initial baseline; `--epochs` specifies
+additional epochs per fold for each completed invocation.
 
-Every default invocation creates a fresh run directory under
-`results/vae_training/` and prints its path. `mi_classification_report.json`
+The default experiment is named `default` and lives at
+`results/vae_training/default/`. Matching names resume automatically:
+
+```bash
+python results/train_vae.py --experiment cardiac-vae --epochs 1
+# Continue the same experiment for one more epoch per fold:
+python results/train_vae.py --experiment cardiac-vae --epochs 1
+# Continue for another 100 epochs per fold:
+python results/train_vae.py --experiment cardiac-vae --epochs 100
+```
+
+Each fold keeps one rolling `fold_N.last.pt` training checkpoint. It replaces
+the previous checkpoint **every 100 epochs**, plus at the end of an invocation
+or early stopping, so even one-epoch experiments can resume. Use
+`--checkpoint-every` to change the interval. Previous periodic copies are not
+retained. `fold_N.pt` holds the best validation model for inference.
+
+Resume restores the latest weights, AdamW state, mixed-precision gradient scaler,
+train-fitted input scaling, RNG and shuffle states, epoch history, KL warmup
+position, best model and early-stopping patience. A resumed fold continues from
+the latest optimization step, while scoring uses its best validation model.
+Checkpoints are replaced atomically; failed writes leave the previous copy
+intact. Abrupt interruption can lose progress since the last checkpoint (up to
+99 epochs with the default cadence).
+
+If an invocation is interrupted, repeat the same command: its original per-fold
+targets are finished, and folds already at their target are not retrained.
+Only after that invocation completes will another call add more epochs. Early
+stopping remains in force across calls. Data, patient membership, split settings,
+model architecture, batch size and optimization settings must match; use a new
+experiment name for different settings. Device, precision, CPU thread count and
+checkpoint cadence may change, but bitwise reproducibility across different
+hardware is not guaranteed. Concurrent writers to one experiment are blocked.
+Older inference-only output directories cannot restore optimizer state and are
+preserved; start a new named experiment instead.
+
+`experiment.json` records experiment identity, cumulative epoch counts and the
+current invocation. `mi_classification_report.json`
 contains the overall scores, per-class precision/recall/F1, and confusion matrix;
 `mi_predictions.csv` contains each patient's true MI diagnosis, predicted
 diagnosis, pMI probability, and scoring fold. Final test patients remain held out.
@@ -185,9 +221,9 @@ both XGBoost and PyTorch in one test process stalled during verification. Both
 suites pass independently; the VAE workflow does not import XGBoost.
 
 Checkpoints, per-epoch histories, fold membership, patient probabilities, latent
-means and CV metrics are saved inside the selected run directory (ignored by Git
-under `results/vae_training/`). An explicit `--output-dir` must be empty;
-nonempty directories are protected.
+means and CV metrics are saved inside the experiment directory (ignored by Git
+under `results/vae_training/`). `--output-dir` can specify an exact directory;
+matching experiment state resumes there, and incompatible contents are protected.
 Latent coordinates from independently trained folds are not aligned and should
 not be pooled as one common embedding. `predict_patients` restores both model
 and preprocessing from a checkpoint:
@@ -198,6 +234,6 @@ from mcpp.vae_training import predict_patients
 # demographics is numeric (patients, 7), in the column order listed above;
 # encode sex as 0/1 using the source dataset's False/True convention.
 probabilities, latent_means, repair_audit = predict_patients(
-    "results/vae_training/<your-run>/fold_1.pt", raw_patient_arrays, demographics,
+    "results/vae_training/cardiac-vae/fold_1.pt", raw_patient_arrays, demographics,
 )
 ```

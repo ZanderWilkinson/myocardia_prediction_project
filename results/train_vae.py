@@ -2,11 +2,12 @@
 
 import argparse
 from dataclasses import asdict
-from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 import time
 
+from filelock import Timeout
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
@@ -14,6 +15,7 @@ from sklearn.model_selection import train_test_split
 from mcpp.vae import VAEConfig
 from mcpp.vae_data import DEMOGRAPHIC_COLUMNS, PreprocessConfig, load_cohort
 from mcpp.vae_training import TrainConfig, cross_validate_vae, mi_classification_report, select_device
+from mcpp.vae_experiments import atomic_json_save, experiment_lock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,9 +24,13 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data/training_data")
+    parser.add_argument("--experiment", default="default",
+                        help="Experiment name; matching names continue training (default: default)")
     parser.add_argument("--output-dir", type=Path,
-                        help="Empty experiment directory; default: a new run inside results/vae_training/")
-    parser.add_argument("--epochs", type=int, default=1, help="Epochs per fold (default: 1)")
+                        help="Experiment directory; default: results/vae_training/<experiment>/")
+    parser.add_argument("--epochs", type=int, default=1, help="Additional epochs per fold for this invocation (default: 1)")
+    parser.add_argument("--checkpoint-every", type=int, default=100,
+                        help="Replace rolling training checkpoints every N epochs and at run end (default: 100)")
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--latent-dim", type=int, default=20)
@@ -35,15 +41,27 @@ def main():
                         help="CUDA mixed precision and gradient scaling (default: enabled); --no-amp uses FP32")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", args.experiment):
+        parser.error("Experiment names must use 1-80 letters, digits, dots, underscores or hyphens, starting with a letter/digit.")
+    if args.epochs < 1 or args.checkpoint_every < 1:
+        parser.error("epochs and checkpoint-every must be positive.")
     # Validate GPU access before reading and preprocessing the cohort.
     try:
         device = select_device(args.device)
     except (ValueError, RuntimeError) as exc:
         parser.error(str(exc))
     if args.output_dir is None:
-        args.output_dir = ROOT / "results/vae_training" / datetime.now(timezone.utc).strftime("run_%Y%m%dT%H%M%S_%fZ")
-    if args.output_dir.exists() and any(args.output_dir.iterdir()):
-        parser.error("Output directory is nonempty; choose a new directory to preserve prior experiments.")
+        args.output_dir = ROOT / "results/vae_training" / args.experiment
+    try:
+        with experiment_lock(args.output_dir) as run_lock:
+            run_experiment(args, device, run_lock)
+    except Timeout:
+        parser.error("This experiment is already being trained by another process.")
+    except (ValueError, RuntimeError) as exc:
+        parser.error(str(exc))
+
+
+def run_experiment(args, device, run_lock):
     meta = pd.read_csv(args.data_dir / "mixed_demographics.csv")
     if not meta.MI.isin(["healthy", "pMI"]).all():
         raise ValueError("Unexpected or missing MI label.")
@@ -62,15 +80,16 @@ def main():
     preprocess = PreprocessConfig(n_points=args.points)
     model = VAEConfig(n_points=args.points, latent_dim=args.latent_dim)
     training = TrainConfig(epochs=args.epochs, batch_size=args.batch_size,
-                           device=str(device), seed=args.seed, amp=args.amp)
+                           device=str(device), seed=args.seed, amp=args.amp,
+                           checkpoint_every=args.checkpoint_every)
     started = time.monotonic()
     print(f"Preparing {len(development)} development patients; {len(held_out)} test patients excluded.", flush=True)
-    print(f"Training {args.epochs} epoch(s) per fold; reporting overall out-of-fold MI classification.\n"
+    print(f"Experiment {args.experiment!r}: adding {args.epochs} epoch(s) per fold "
+          f"(an unfinished invocation resumes its saved targets).\n"
           f"Results: {args.output_dir}", flush=True)
     xyz, regions, demographics, labels, audit = load_cohort(args.data_dir, development, preprocess)
     development = np.asarray([a["patient_index"] for a in audit if not a["excluded"]], dtype=int)
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    (args.output_dir / "frame_quality.json").write_text(json.dumps(audit, indent=2))
     retained_audit = [a for a in audit if not a["excluded"]]
     print(f"Repaired {sum(len(a['flagged_frames']) for a in retained_audit)} frames in "
           f"{sum(bool(a['flagged_frames']) for a in retained_audit)} retained patients; "
@@ -79,7 +98,9 @@ def main():
         xyz, regions, demographics, labels, n_splits=args.folds, model_config=model,
         train_config=training, preprocess_config=preprocess, output_dir=args.output_dir,
         patient_ids=development,
+        experiment_name=args.experiment, run_lock=run_lock,
     )
+    atomic_json_save(audit, args.output_dir / "frame_quality.json")
     # Latent axes from independently fitted folds are not aligned for joint analysis.
     probabilities = result.pop("oof_probabilities")
     np.savez_compressed(args.output_dir / "oof_predictions.npz", patient_ids=development,
@@ -93,14 +114,17 @@ def main():
                    "classification_threshold": .5,
                    "latent_axes_aligned_across_folds": False,
                    "total_seconds": time.monotonic() - started})
-    (args.output_dir / "cv_results.json").write_text(json.dumps(result, indent=2))
+    atomic_json_save(result, args.output_dir / "cv_results.json")
     report = mi_classification_report(labels, probabilities)
     report.update(evaluation="stratified patient-level out-of-fold MI predictions",
-                  n_folds=args.folds, epochs_per_fold=args.epochs, test_set_scored=False,
+                  n_folds=args.folds, epochs_per_fold=max(f["completed_epochs"] for f in result["folds"]),
+                  epochs_added_per_invocation=args.epochs, experiment_name=args.experiment,
+                  completed_epochs_per_fold=[f["completed_epochs"] for f in result["folds"]],
+                  test_set_scored=False,
                   n_quality_excluded=len(result["quality_excluded_patient_ids"]),
                   n_test_held_out=len(held_out),
                   quality_excluded_patient_ids=result["quality_excluded_patient_ids"])
-    (args.output_dir / "mi_classification_report.json").write_text(json.dumps(report, indent=2))
+    atomic_json_save(report, args.output_dir / "mi_classification_report.json")
     patient_folds = {patient: fold["fold"] for fold in result["folds"] for patient in fold["score_patient_ids"]}
     pd.DataFrame({"patient_index": development,
                   "fold": [patient_folds[int(patient)] for patient in development],
