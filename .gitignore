@@ -209,6 +209,9 @@ pyrightconfig.json
 # End of https://www.toptal.com/developers/gitignore/api/python,macos
 
 data/*
+results/xgboost_tuning/pca_scores_*.npz
+results/vae_training/
+results/vae_smoke*/
 .venv/
 __pycache__/
 *.py[cod]

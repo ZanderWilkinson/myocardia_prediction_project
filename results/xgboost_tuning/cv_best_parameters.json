@@ -1,0 +1,56 @@
+{
+  "selection": "highest mean ROC-AUC across 5 stratified CV folds in the 540-patient training set",
+  "candidates": 240,
+  "folds": 5,
+  "validation_used_once_after_selection": true,
+  "test_set_scored": false,
+  "pca_refit": false,
+  "pca_components": 540,
+  "features_per_patient": 547,
+  "selected_parameters": {
+    "colsample_bytree": 0.34591733483469744,
+    "gamma": 0.0006791532534931287,
+    "learning_rate": 0.04106680344537122,
+    "max_bin": 256,
+    "max_depth": 4,
+    "min_child_weight": 0.68274176187461,
+    "reg_alpha": 0.2196707090793235,
+    "reg_lambda": 0.00010980396687878798,
+    "subsample": 0.795690357244969,
+    "n_estimators": 150,
+    "random_state": 20261015,
+    "tree_method": "hist"
+  },
+  "selected_cv": {
+    "mean_auc": 0.9188529835979173,
+    "sd_auc": 0.026413656970048216,
+    "fold_auc": [
+      0.929355281207133,
+      0.9368998628257887,
+      0.9104938271604939,
+      0.9410150891632374,
+      0.8765008576329332
+    ],
+    "fold_best_iterations": [
+      101,
+      87,
+      244,
+      178,
+      150
+    ]
+  },
+  "validation_metrics_single_final_check": {
+    "roc_auc": 0.8455364859859242,
+    "accuracy": 0.55,
+    "balanced_accuracy": 0.5453142363254723,
+    "f1_pMI": 0.21359223300970873,
+    "n_pMI_missed_at_cv_threshold": 78,
+    "n_pMI": 89,
+    "threshold": 0.43934184312820435
+  },
+  "caveat": "PCA scores were computed once on all training patients before CV; PCA was unsupervised, but fold feature transforms were therefore transductive.",
+  "classification_threshold": 0.43934184312820435,
+  "threshold_selection": "maximizes Youden J on train-only out-of-fold probabilities",
+  "train_oof_auc": 0.9110550213308825,
+  "train_oof_balanced_accuracy_at_threshold": 0.8501282596469086
+}

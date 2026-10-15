@@ -1,0 +1,371 @@
+{
+  "components_tested": [
+    10,
+    25,
+    50,
+    100,
+    200,
+    300,
+    540
+  ],
+  "candidate_count_per_dimension": 240,
+  "patient_level_cv_folds": 5,
+  "validation_used_to_compare_dimensions": true,
+  "test_set_scored": false,
+  "pca_scope": "each PCA fitted on the 540 training patients only; validation transformed with that PCA",
+  "threshold_objective": "Each fold's threshold maximizes balanced accuracy on that fold's inner calibration subset; final cutoff is the median fold threshold.",
+  "note": "Validation metrics compare candidate dimensions and are selection metrics, not a final unbiased estimate. PCA was fit once on the full training subset before inner CV, so CV PCA transforms are unsupervised-transductive.",
+  "results": {
+    "10": {
+      "selected_by": "highest mean outer-fold balanced accuracy; cutoff calibrated on inner stopping split to maximize balanced accuracy",
+      "cv": {
+        "cv_auc_mean": 0.8654903566294203,
+        "cv_auc_sd": 0.016591590094368877,
+        "cv_f2_mean": 0.8053252095843826,
+        "cv_recall_mean": 0.8102026554856743,
+        "cv_balanced_accuracy_mean": 0.7980642907058002
+      },
+      "parameters": {
+        "colsample_bytree": 0.9558520519239482,
+        "gamma": 0.010246813104647,
+        "learning_rate": 0.0080427022958963,
+        "max_bin": 64,
+        "max_depth": 11,
+        "min_child_weight": 0.3132212675233848,
+        "reg_alpha": 0.0002133604526501,
+        "reg_lambda": 0.2560575633119897,
+        "subsample": 0.6895839327448405,
+        "n_estimators": 25,
+        "classification_threshold": 0.5203666687011719,
+        "random_state": 20261015
+      },
+      "validation": {
+        "cv_threshold": {
+          "threshold": 0.5203666687011719,
+          "roc_auc": 0.8396098283738733,
+          "accuracy": 0.7166666666666667,
+          "balanced_accuracy": 0.7147178664032596,
+          "precision_pMI": 0.8275862068965517,
+          "recall_pMI": 0.5393258426966292,
+          "f1_pMI": 0.6530612244897959,
+          "pMI_detected": 48,
+          "pMI_total": 89
+        },
+        "default_0_5": {
+          "threshold": 0.5,
+          "roc_auc": 0.8396098283738733,
+          "accuracy": 0.75,
+          "balanced_accuracy": 0.7492900358068897,
+          "precision_pMI": 0.782051282051282,
+          "recall_pMI": 0.6853932584269663,
+          "f1_pMI": 0.7305389221556886,
+          "f2_pMI": 0.7027649769585252,
+          "pMI_detected": 61,
+          "pMI_total": 89
+        }
+      },
+      "trials_file": "balanced_cv_trials_10pc.csv"
+    },
+    "25": {
+      "selected_by": "highest mean outer-fold balanced accuracy; cutoff calibrated on inner stopping split to maximize balanced accuracy",
+      "cv": {
+        "cv_auc_mean": 0.9067136305990255,
+        "cv_auc_sd": 0.021724880892567546,
+        "cv_f2_mean": 0.8502504977009941,
+        "cv_recall_mean": 0.8624737945492663,
+        "cv_balanced_accuracy_mean": 0.8279709040086398
+      },
+      "parameters": {
+        "colsample_bytree": 0.5184697103983379,
+        "gamma": 0.0120204150567255,
+        "learning_rate": 0.0516213851412267,
+        "max_bin": 512,
+        "max_depth": 8,
+        "min_child_weight": 0.8184605701935403,
+        "reg_alpha": 0.0792016405019254,
+        "reg_lambda": 0.0100351652908713,
+        "subsample": 0.6779488574820642,
+        "n_estimators": 167,
+        "classification_threshold": 0.34249407052993774,
+        "random_state": 20261015
+      },
+      "validation": {
+        "cv_threshold": {
+          "threshold": 0.34249407052993774,
+          "roc_auc": 0.9069020866773677,
+          "accuracy": 0.8388888888888889,
+          "balanced_accuracy": 0.8389307321891591,
+          "precision_pMI": 0.8333333333333334,
+          "recall_pMI": 0.8426966292134831,
+          "f1_pMI": 0.8379888268156425,
+          "pMI_detected": 75,
+          "pMI_total": 89
+        },
+        "default_0_5": {
+          "threshold": 0.5,
+          "roc_auc": 0.9069020866773677,
+          "accuracy": 0.8277777777777777,
+          "balanced_accuracy": 0.8274478330658106,
+          "precision_pMI": 0.8452380952380952,
+          "recall_pMI": 0.797752808988764,
+          "f1_pMI": 0.8208092485549133,
+          "f2_pMI": 0.8068181818181819,
+          "pMI_detected": 71,
+          "pMI_total": 89
+        }
+      },
+      "trials_file": "balanced_cv_trials_25pc.csv"
+    },
+    "50": {
+      "selected_by": "highest mean outer-fold balanced accuracy; cutoff calibrated on inner stopping split to maximize balanced accuracy",
+      "cv": {
+        "cv_auc_mean": 0.9097312514852696,
+        "cv_auc_sd": 0.02210416598894756,
+        "cv_f2_mean": 0.8285018094402972,
+        "cv_recall_mean": 0.8254367575122293,
+        "cv_balanced_accuracy_mean": 0.839014675052411
+      },
+      "parameters": {
+        "colsample_bytree": 0.466565342707396,
+        "gamma": 0.0593233887966171,
+        "learning_rate": 0.0881194892090306,
+        "max_bin": 128,
+        "max_depth": 7,
+        "min_child_weight": 1.2978902400216534,
+        "reg_alpha": 0.0350190046143171,
+        "reg_lambda": 0.0124636665590054,
+        "subsample": 0.9180065321330658,
+        "n_estimators": 75,
+        "classification_threshold": 0.4758680760860443,
+        "random_state": 20261015
+      },
+      "validation": {
+        "cv_threshold": {
+          "threshold": 0.4758680760860443,
+          "roc_auc": 0.8913446104457341,
+          "accuracy": 0.7944444444444444,
+          "balanced_accuracy": 0.7941103839980244,
+          "precision_pMI": 0.8095238095238095,
+          "recall_pMI": 0.7640449438202247,
+          "f1_pMI": 0.7861271676300579,
+          "pMI_detected": 68,
+          "pMI_total": 89
+        },
+        "default_0_5": {
+          "threshold": 0.5,
+          "roc_auc": 0.8913446104457341,
+          "accuracy": 0.8,
+          "balanced_accuracy": 0.79960488949253,
+          "precision_pMI": 0.8192771084337349,
+          "recall_pMI": 0.7640449438202247,
+          "f1_pMI": 0.7906976744186046,
+          "f2_pMI": 0.7744874715261958,
+          "pMI_detected": 68,
+          "pMI_total": 89
+        }
+      },
+      "trials_file": "balanced_cv_trials_50pc.csv"
+    },
+    "100": {
+      "selected_by": "highest mean outer-fold balanced accuracy; cutoff calibrated on inner stopping split to maximize balanced accuracy",
+      "cv": {
+        "cv_auc_mean": 0.9283887324208777,
+        "cv_auc_sd": 0.026346911903337104,
+        "cv_f2_mean": 0.8758746122254021,
+        "cv_recall_mean": 0.8883298392732357,
+        "cv_balanced_accuracy_mean": 0.8537608792325774
+      },
+      "parameters": {
+        "colsample_bytree": 0.1795335030353784,
+        "gamma": 0.0087349046023847,
+        "learning_rate": 0.0081659919897684,
+        "max_bin": 128,
+        "max_depth": 12,
+        "min_child_weight": 0.371604163883302,
+        "reg_alpha": 0.0792016405019254,
+        "reg_lambda": 0.0329314675237778,
+        "subsample": 0.6945128117331127,
+        "n_estimators": 128,
+        "classification_threshold": 0.5133129954338074,
+        "random_state": 20261015
+      },
+      "validation": {
+        "cv_threshold": {
+          "threshold": 0.5133129954338074,
+          "roc_auc": 0.9187554019014693,
+          "accuracy": 0.8333333333333334,
+          "balanced_accuracy": 0.8326953944931472,
+          "precision_pMI": 0.8734177215189873,
+          "recall_pMI": 0.7752808988764045,
+          "f1_pMI": 0.8214285714285714,
+          "pMI_detected": 69,
+          "pMI_total": 89
+        },
+        "default_0_5": {
+          "threshold": 0.5,
+          "roc_auc": 0.9187554019014693,
+          "accuracy": 0.8388888888888889,
+          "balanced_accuracy": 0.8386837881219904,
+          "precision_pMI": 0.8488372093023255,
+          "recall_pMI": 0.8202247191011236,
+          "f1_pMI": 0.8342857142857143,
+          "f2_pMI": 0.8257918552036198,
+          "pMI_detected": 73,
+          "pMI_total": 89
+        }
+      },
+      "trials_file": "balanced_cv_trials_100pc.csv"
+    },
+    "200": {
+      "selected_by": "highest mean outer-fold balanced accuracy; cutoff calibrated on inner stopping split to maximize balanced accuracy",
+      "cv": {
+        "cv_auc_mean": 0.9164520349076604,
+        "cv_auc_sd": 0.033780332759200386,
+        "cv_f2_mean": 0.8692627070614594,
+        "cv_recall_mean": 0.8769392033542978,
+        "cv_balanced_accuracy_mean": 0.8572574804650277
+      },
+      "parameters": {
+        "colsample_bytree": 0.8560372840749777,
+        "gamma": 0.1123436544260542,
+        "learning_rate": 0.1619951474435057,
+        "max_bin": 512,
+        "max_depth": 11,
+        "min_child_weight": 0.2758102872938701,
+        "reg_alpha": 0.0045522682755073,
+        "reg_lambda": 53.65149164648348,
+        "subsample": 0.6310400869184501,
+        "n_estimators": 358,
+        "classification_threshold": 0.4122021794319153,
+        "random_state": 20261015
+      },
+      "validation": {
+        "cv_threshold": {
+          "threshold": 0.4122021794319153,
+          "roc_auc": 0.905173478207186,
+          "accuracy": 0.8333333333333334,
+          "balanced_accuracy": 0.8335596987282381,
+          "precision_pMI": 0.8172043010752689,
+          "recall_pMI": 0.8539325842696629,
+          "f1_pMI": 0.8351648351648352,
+          "pMI_detected": 76,
+          "pMI_total": 89
+        },
+        "default_0_5": {
+          "threshold": 0.5,
+          "roc_auc": 0.905173478207186,
+          "accuracy": 0.8111111111111111,
+          "balanced_accuracy": 0.8108408445487097,
+          "precision_pMI": 0.8235294117647058,
+          "recall_pMI": 0.7865168539325843,
+          "f1_pMI": 0.8045977011494253,
+          "f2_pMI": 0.7936507936507937,
+          "pMI_detected": 70,
+          "pMI_total": 89
+        }
+      },
+      "trials_file": "balanced_cv_trials_200pc.csv"
+    },
+    "300": {
+      "selected_by": "highest mean outer-fold balanced accuracy; cutoff calibrated on inner stopping split to maximize balanced accuracy",
+      "cv": {
+        "cv_auc_mean": 0.9170713658833854,
+        "cv_auc_sd": 0.012799811109980314,
+        "cv_f2_mean": 0.8957169627220404,
+        "cv_recall_mean": 0.9217330538085255,
+        "cv_balanced_accuracy_mean": 0.850193126230862
+      },
+      "parameters": {
+        "colsample_bytree": 0.3459173348346974,
+        "gamma": 0.0006791532534931,
+        "learning_rate": 0.0410668034453712,
+        "max_bin": 256,
+        "max_depth": 4,
+        "min_child_weight": 0.68274176187461,
+        "reg_alpha": 0.2196707090793235,
+        "reg_lambda": 0.0001098039668787,
+        "subsample": 0.795690357244969,
+        "n_estimators": 262,
+        "classification_threshold": 0.35262531042099,
+        "random_state": 20261015
+      },
+      "validation": {
+        "cv_threshold": {
+          "threshold": 0.35262531042099,
+          "roc_auc": 0.9051734782071861,
+          "accuracy": 0.8055555555555556,
+          "balanced_accuracy": 0.8064575873564637,
+          "precision_pMI": 0.7596153846153846,
+          "recall_pMI": 0.8876404494382022,
+          "f1_pMI": 0.8186528497409327,
+          "pMI_detected": 79,
+          "pMI_total": 89
+        },
+        "default_0_5": {
+          "threshold": 0.5,
+          "roc_auc": 0.9051734782071861,
+          "accuracy": 0.8388888888888889,
+          "balanced_accuracy": 0.8389307321891591,
+          "precision_pMI": 0.8333333333333334,
+          "recall_pMI": 0.8426966292134831,
+          "f1_pMI": 0.8379888268156425,
+          "f2_pMI": 0.8408071748878925,
+          "pMI_detected": 75,
+          "pMI_total": 89
+        }
+      },
+      "trials_file": "balanced_cv_trials_300pc.csv"
+    },
+    "540": {
+      "selected_by": "highest mean outer-fold balanced accuracy; cutoff calibrated on inner stopping split to maximize balanced accuracy",
+      "cv": {
+        "cv_auc_mean": 0.9163839654405692,
+        "cv_auc_sd": 0.026432686900251568,
+        "cv_f2_mean": 0.8591873245066168,
+        "cv_recall_mean": 0.8735150244584207,
+        "cv_balanced_accuracy_mean": 0.8352423607140589
+      },
+      "parameters": {
+        "colsample_bytree": 0.4123466497124858,
+        "gamma": 0.0002221535430116,
+        "learning_rate": 0.1060588327172874,
+        "max_bin": 128,
+        "max_depth": 4,
+        "min_child_weight": 0.8784323259092472,
+        "reg_alpha": 0.0429448798878927,
+        "reg_lambda": 2.6700125745761425,
+        "subsample": 0.5117187684577068,
+        "n_estimators": 172,
+        "classification_threshold": 0.5908293128013611,
+        "random_state": 20261015
+      },
+      "validation": {
+        "cv_threshold": {
+          "threshold": 0.5908293128013611,
+          "roc_auc": 0.8852944808000989,
+          "accuracy": 0.6055555555555555,
+          "balanced_accuracy": 0.6012470675392024,
+          "precision_pMI": 0.95,
+          "recall_pMI": 0.21348314606741572,
+          "f1_pMI": 0.3486238532110092,
+          "pMI_detected": 19,
+          "pMI_total": 89
+        },
+        "default_0_5": {
+          "threshold": 0.5,
+          "roc_auc": 0.8852944808000989,
+          "accuracy": 0.65,
+          "balanced_accuracy": 0.6464378318310903,
+          "precision_pMI": 0.90625,
+          "recall_pMI": 0.3258426966292135,
+          "f1_pMI": 0.4793388429752066,
+          "f2_pMI": 0.37371134020618557,
+          "pMI_detected": 29,
+          "pMI_total": 89
+        }
+      },
+      "trials_file": "balanced_cv_trials_540pc.csv"
+    }
+  },
+  "final_cutoff_calibration": "For each selected fixed-tree-count model, calibrated the cutoff with the same training-only five-fold inner-holdout procedure used in the notebook; then refit all training patients and evaluated validation once."
+}

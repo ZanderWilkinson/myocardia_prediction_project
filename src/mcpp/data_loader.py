@@ -90,11 +90,5 @@ class Patient():
         print(f"Loading {self.sample_file}")
         self.data = np.load(self.sample_file)
 
-    # def vis_cloud(self, frame_num):
-    #     vis.visualise_cloud(self, frame_num)
-
-    # def vis_heartbeat(self):
-    #     vis.visualise_heartbeat(self)
-    
 
     

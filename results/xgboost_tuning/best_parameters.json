@@ -1,0 +1,106 @@
+{
+  "selection_metric": "mean validation ROC-AUC across random seeds 11, 22, and 33, among the top four tuned settings",
+  "selected": {
+    "learning_rate": 0.03656,
+    "max_depth": 4,
+    "min_child_weight": 3.3467,
+    "subsample": 0.6061,
+    "colsample_bytree": 0.6566,
+    "reg_lambda": 3.54523,
+    "reg_alpha": 0.00015,
+    "gamma": 0.0036,
+    "n_estimators": 1000,
+    "early_stopping_rounds": 60,
+    "random_state": 42,
+    "validation_roc_auc_seed_42": 0.918384985800716,
+    "validation_accuracy_seed_42": 0.7444444444444445,
+    "validation_balanced_accuracy_seed_42": 0.7415730337078652,
+    "validation_f1_pMI_seed_42": 0.6515151515151515,
+    "best_iteration_seed_42": 659,
+    "validation_roc_auc_mean_3_seeds": 0.910441618306787,
+    "validation_roc_auc_sd_3_seeds": 0.00469247878896499,
+    "validation_roc_auc_range_3_seeds": [
+      0.907025558710952,
+      0.915792073095444
+    ]
+  },
+  "baseline_validation": {
+    "roc_auc": 0.8931966909494998,
+    "accuracy": 0.7,
+    "balanced_accuracy": 0.6967526855167305,
+    "f1_pMI": 0.5714285714285714
+  },
+  "single_run_validation_peak": {
+    "roc_auc": 0.9198666502037288,
+    "depth": 4,
+    "best_iteration": 568
+  },
+  "validation_mean_auc_of_top_five_single_runs": 0.9167057661439684,
+  "seed_check_settings_ranked_by_mean_auc": [
+    {
+      "learning_rate": 0.03656,
+      "max_depth": 4,
+      "min_child_weight": 3.3467,
+      "subsample": 0.6061,
+      "colsample_bytree": 0.6566,
+      "reg_lambda": 3.54523,
+      "reg_alpha": 0.00015,
+      "gamma": 0.0036,
+      "mean_roc_auc": 0.910441618306787,
+      "sd_roc_auc": 0.00469247878896499,
+      "min_roc_auc": 0.907025558710952,
+      "max_roc_auc": 0.915792073095444
+    },
+    {
+      "learning_rate": 0.036557531808587,
+      "max_depth": 4,
+      "min_child_weight": 3.346744461559163,
+      "subsample": 0.606087717656551,
+      "colsample_bytree": 0.6566461658850647,
+      "reg_lambda": 3.545230735262264,
+      "reg_alpha": 0.0001541197702397,
+      "gamma": 0.0035969891866127,
+      "mean_roc_auc": 0.9074782895007614,
+      "sd_roc_auc": 0.004242002665302691,
+      "min_roc_auc": 0.9025805655019138,
+      "max_roc_auc": 0.9099888875169774
+    },
+    {
+      "learning_rate": 0.05118,
+      "max_depth": 4,
+      "min_child_weight": 3.3467,
+      "subsample": 0.6061,
+      "colsample_bytree": 0.6566,
+      "reg_lambda": 7.09046,
+      "reg_alpha": 0.00015,
+      "gamma": 0.0036,
+      "mean_roc_auc": 0.9059966250977487,
+      "sd_roc_auc": 0.0005567662369209773,
+      "min_roc_auc": 0.9054204222743548,
+      "max_roc_auc": 0.9065316705766144
+    },
+    {
+      "learning_rate": 0.0877860088249317,
+      "max_depth": 3,
+      "min_child_weight": 1.0786242066466354,
+      "subsample": 0.652215250517418,
+      "colsample_bytree": 0.583240933820355,
+      "reg_lambda": 15.819823282329644,
+      "reg_alpha": 0.0031820494331269,
+      "gamma": 0.0339418197231736,
+      "mean_roc_auc": 0.8984648310491007,
+      "sd_roc_auc": 0.003373145077937637,
+      "min_roc_auc": 0.8956661316211878,
+      "max_roc_auc": 0.9022101494011606
+    }
+  ],
+  "search_trials": 169,
+  "random_search_trials": 120,
+  "local_refinement_trials": 36,
+  "seed_check_fits": 12,
+  "pca_components": 540,
+  "train_patients": 540,
+  "validation_patients": 180,
+  "test_patients": 180,
+  "test_set_scored": false
+}

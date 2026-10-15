@@ -24,3 +24,142 @@ include data files in /data/ as
 labeled_test_data
 test_samples
 training_data
+
+## XGBoost experiments
+
+Open `notebooks/xgboosting.ipynb` with the Python (MCPP) kernel. Run the data
+and PCA preparation cells once, then edit `XGB_PARAMS` and rerun the training
+cells. Prepared features are cached locally and verified against their source
+data and patient splits, so they can be reused after a kernel restart. Set
+`REFIT_PCA=True` to rebuild them; changing the PCA settings also triggers a refit.
+
+`pca_datasubset(..., motion_only=True)` uses all frames' XYZ coordinates without
+demographics or anatomical labels. It does not compute displacements. The
+default behavior of existing calls is unchanged. The new notebook optionally
+adds demographics after PCA and keeps final test evaluation disabled while tuning.
+
+XGBoost is included in the project dependencies. On macOS, install its OpenMP
+runtime with `brew install libomp` if importing XGBoost reports a missing library.
+The patient-level PCA score cache is ignored by Git.
+
+## Attention VAE with an MI classification head
+
+Open `notebooks/vae.ipynb` with the Python (MCPP) kernel, or run:
+
+```bash
+python -m pip install -e .
+python results/train_vae.py --epochs 60 --folds 5 --batch-size 8
+```
+
+The default model has **10,389,281 trainable parameters**, a **20-dimensional
+Gaussian latent space**, eight attention heads, and width 384. Each cycle starts
+as `(10, 18000, 4)` with XYZ and categorical anatomical region IDs. We retain
+128 points per region (384 per frame), using the same sampled indices across
+all frames. Sixteen learned spatial queries attend to the points in each frame;
+two encoder blocks each apply spatial attention followed by temporal attention
+across the ten frames. The latent-only decoder uses one such block and
+reconstructs `(10, 384, 3)` XYZ coordinates. It reconstructs the sampled cloud,
+not all 18,000 original points. Attention uses PyTorch's
+[TransformerEncoderLayer](https://docs.pytorch.org/docs/stable/generated/torch.nn.TransformerEncoderLayer.html)
+and [MultiheadAttention](https://docs.pytorch.org/docs/stable/generated/torch.nn.MultiheadAttention.html).
+
+**Demographics enter only the classifier:** age, BMI, height, weight, diastolic
+BP, systolic BP and sex are standardized using the current training fold, then
+concatenated with the latent mean and passed through 128- and 64-unit hidden
+layers to predict healthy=0 versus pMI=1. Demographics never enter the encoder
+or decoder. Anatomical region IDs 0/1/2 are embedded categorical inputs;
+they are distinct from the patient MI label. Predictions use the latent mean
+for deterministic inference. Training samples the latent for reconstruction.
+
+Before sampling or normalization, `repair_frames` checks the full-resolution
+cycle using RMS radius, 99th-percentile radius, maximum radius, bounding extent
+and centroid displacement. Expansion must exceed both a conservative six-MAD
+threshold and a 1.75-fold within-patient size threshold. A separate pointwise
+temporal check detects scattered points even when global heart size stays nearly
+normal: interpolation residuals must exceed six MADs, three times their median,
+and 15% of typical radius, and neighbouring frames must agree with one another.
+Nonfinite XYZ frames are also flagged. An isolated flagged frame becomes the average of its valid
+neighbours; consecutive flags are linearly interpolated between the nearest
+valid frames. Endpoints copy their nearest valid frame by default;
+`PreprocessConfig(cyclic=True)` interpolates across the cycle boundary instead.
+Anatomical IDs remain unchanged. All repairs and selected point indices are
+recorded in `frame_quality.json`; source files are never overwritten. These
+heuristics target gross artifacts and should be checked against visual examples
+before changing thresholds. A spatial coherence check also measures the median
+distance between consecutive same-region template points relative to median
+radius. Per-patient K-means (`k=2`) clusters the log scores; the rougher cluster
+is marked defective only if its centre is at least three times the smoother
+cluster's centre. This catches consecutive defects and cycles whose median
+frame is noisy, without forcing normal cycles into a defect category. The
+audit stores cluster membership, centres and their separation ratio.
+This assumes the original ordered surface points; shuffling point order destroys
+this measure. Cycles with a majority of suspect frames raise an auditable error
+in `repair_frames`. The training loader excludes these cycles, prints the count,
+and saves their patient IDs, affected frames and exclusion reasons in the quality
+audit. Set `load_cohort(..., exclude_unrepairable=False)` for strict failure.
+Cycles with no clean reference at all may still need manual inspection. Run
+`python results/audit_vae_frames.py` to reproduce the development-set repair audit.
+
+The current audit identifies **303 suspect frames in 62 of 720 development
+patients**: 37 patients receive 109 frame replacements, while 25 patients with
+194 suspect frames are excluded because most of their cycle is corrupted.
+These counts come from the measured spatial discontinuity, without enforcing
+a target defect prevalence. Held-out test point arrays are not opened.
+
+We assume point indices track the same point across frames and ordered templates
+are comparable across patients. Frame region consistency is checked explicitly.
+The ordered XYZ reconstruction loss depends on this assumption; for unordered
+clouds, a set reconstruction objective would be needed. One centre is removed
+for the entire patient cycle, preserving inter-frame motion. A shared scalar
+XYZ scale is learned on each fold's fitting patients; per-frame normalization
+would erase contraction and is deliberately avoided.
+
+Training minimizes mean XYZ MSE + `beta * mean latent KL` + binary classification
+loss. `beta` warms to 0.01 over ten epochs; AdamW, gradient clipping, training-only
+class weights and early stopping on inner validation classification loss are
+enabled. Defaults are 60 epochs, batch size 8, learning rate 0.0003 and patience
+10. GPU (CUDA), Apple GPU (MPS), or CPU is selected automatically when available.
+Use `--device mps` to request the Mac GPU explicitly. MPS requires GPU access;
+restricted processes can report it unavailable even on a supported Mac.
+Each epoch prints training and inner-validation accuracy, pMI F1 and macro F1
+at a fixed probability cutoff of 0.5, and saves them in the fold's `history`.
+Scores pool all patients in each split instead of averaging minibatch scores.
+Training scores come from the training pass; validation scores use the model
+at the end of the epoch with dropout disabled.
+
+The runner excludes the same 20% patient test split used by `DataSet` (seed 42).
+Five stratified outer folds use the remaining 80%; each fold has its own inner
+15% holdout for early stopping. Model weights, optimizer, geometry scaling and
+demographic scaling are fitted afresh per fold. Outer fold patients are used
+only for scoring. The runner never loads final test point clouds. Using these
+CV scores repeatedly to select architectures is model selection; retain the
+held-out test for the eventual final evaluation.
+
+For a short pipeline check using the full-size model:
+
+```bash
+python results/train_vae.py --epochs 2 --folds 2 --limit-patients 40 --batch-size 4 --output-dir results/vae_smoke_local
+python -m unittest discover -s tests -p 'test_vae.py'
+python -m unittest discover -s tests -p 'test_pca_xgboost.py'
+```
+
+Run these test suites in separate processes on this Mac: loading and exercising
+both XGBoost and PyTorch in one test process stalled during verification. Both
+suites pass independently; the VAE workflow does not import XGBoost.
+
+Checkpoints, per-epoch histories, fold membership, patient probabilities, latent
+means and CV metrics are saved under `results/vae_training/` (ignored by Git).
+Use a new `--output-dir` for each experiment; nonempty directories are protected.
+Latent coordinates from independently trained folds are not aligned and should
+not be pooled as one common embedding. `predict_patients` restores both model
+and preprocessing from a checkpoint:
+
+```python
+from mcpp.vae_training import predict_patients
+
+# demographics is numeric (patients, 7), in the column order listed above;
+# encode sex as 0/1 using the source dataset's False/True convention.
+probabilities, latent_means, repair_audit = predict_patients(
+    "results/vae_training/fold_1.pt", raw_patient_arrays, demographics,
+)
+```
