@@ -46,8 +46,19 @@ def atomic_json_save(value, path):
 
 def training_identity(config):
     # Runtime placement/precision and checkpoint cadence can change on resume.
-    ignored = {"epochs", "device", "cpu_threads", "amp", "checkpoint_every"}
+    ignored = {"epochs", "device", "cpu_threads", "amp", "checkpoint_every", "patience", "early_stopping"}
     return {key: value for key, value in asdict(config).items() if key not in ignored}
+
+
+def canonical_identity(value):
+    """Allow runtime stopping controls to change, including in older checkpoints."""
+    if not isinstance(value, dict):
+        return value
+    result = {key: canonical_identity(item) for key, item in value.items()}
+    if isinstance(result.get("training"), dict):
+        result["training"] = {k: v for k, v in result["training"].items()
+                              if k not in {"patience", "early_stopping"}}
+    return result
 
 
 def array_signature(*arrays):
@@ -98,7 +109,7 @@ def begin_invocation(directory, identity, *, epochs, n_splits):
     path = Path(directory) / "experiment.json"
     if path.exists():
         manifest = json.loads(path.read_text())
-        if manifest.get("version") != 1 or manifest.get("identity") != identity:
+        if manifest.get("version") != 1 or canonical_identity(manifest.get("identity")) != canonical_identity(identity):
             raise ValueError("Experiment settings or patient data differ from the saved experiment. "
                              "Use a new experiment name for different data, splits or hyperparameters.")
         for fold, completed in enumerate(manifest["completed_epochs"], 1):
@@ -107,8 +118,20 @@ def begin_invocation(directory, identity, *, epochs, n_splits):
                                  "a completed fold silently. Restore its checkpoint or use a new experiment name.")
         if manifest["invocation"]["status"] == "running":
             if manifest["invocation"]["epochs_to_add"] != epochs:
-                raise ValueError("This experiment has an unfinished invocation. Repeat its original "
-                                 f"--epochs {manifest['invocation']['epochs_to_add']} to finish it first.")
+                invocation = manifest["invocation"]
+                targets = [target - invocation["epochs_to_add"] + epochs
+                           for target in invocation["target_epochs"]]
+                for fold, target in enumerate(targets, 1):
+                    checkpoint = Path(directory) / f"fold_{fold}.last.pt"
+                    completed = manifest["completed_epochs"][fold - 1]
+                    if checkpoint.exists():
+                        completed = max(completed, torch.load(checkpoint, map_location="cpu",
+                                                              weights_only=True, mmap=True)["epoch"])
+                    if target < completed:
+                        raise ValueError(f"The new epoch budget would put fold {fold}'s target before "
+                                         f"its saved epoch {completed}. Increase --epochs instead.")
+                invocation.update(epochs_to_add=epochs, target_epochs=targets)
+                atomic_json_save(manifest, path)
             return manifest
         number = manifest["invocation"]["number"] + 1
         completed = manifest["completed_epochs"]

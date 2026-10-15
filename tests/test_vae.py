@@ -15,6 +15,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, f1_score
+from sklearn.model_selection import train_test_split
 import torch
 
 from mcpp.vae import CardiacVAE, VAEConfig, vae_loss
@@ -22,7 +23,7 @@ from mcpp.vae_data import (DEMOGRAPHIC_COLUMNS, PreprocessConfig, UnrepairableCy
                            load_cohort, prepare_arrays, prepare_patient, repair_frames)
 from mcpp.vae_training import (FoldScaler, TrainConfig, cross_validate_vae, fit_vae,
                                 load_checkpoint, predict_patients, predict_prepared, save_checkpoint,
-                                mi_classification_report, select_device)
+                                mi_classification_report, select_device, train_holdout_vae)
 from mcpp.vae_experiments import atomic_torch_save, experiment_lock
 
 
@@ -508,9 +509,6 @@ class TrainingTests(unittest.TestCase):
             manifest = json.loads((Path(directory) / "experiment.json").read_text())
             self.assertEqual(manifest["invocation"]["status"], "running")
             self.assertEqual(manifest["completed_epochs"], [1, 0])
-            with self.assertRaisesRegex(ValueError, "unfinished invocation"):
-                cross_validate_vae(self.xyz, self.regions, self.demographics, self.labels,
-                                   **{**kwargs, "train_config": replace(self.training, epochs=2)})
             resumed = cross_validate_vae(self.xyz, self.regions, self.demographics, self.labels, **kwargs)
             self.assertEqual([f["completed_epochs"] for f in resumed["folds"]], [1, 1])
             self.assertEqual([f["epochs_this_invocation"] for f in resumed["folds"]], [0, 1])
@@ -566,7 +564,7 @@ class TrainingTests(unittest.TestCase):
             torch.testing.assert_close(resumed.state_dict()[name], value, rtol=0, atol=0)
 
     def test_early_stopping_state_persists_across_resume(self):
-        config = replace(self.training, learning_rate=1e-9, patience=1)
+        config = replace(self.training, learning_rate=1e-9, patience=1, early_stopping=True)
         with tempfile.TemporaryDirectory() as directory:
             checkpoint = Path(directory) / "rolling.pt"
             kwargs = dict(model_config=self.model_config, checkpoint_path=checkpoint, verbose=False)
@@ -580,6 +578,126 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(stopped["completed_epochs"], 2)
         self.assertEqual(resumed["epochs_this_invocation"], 0)
         self.assertEqual(resumed["completed_epochs"], 2)
+
+    def test_default_continues_a_legacy_early_stopped_experiment(self):
+        stopped_config = replace(self.training, learning_rate=1e-9, patience=1,
+                                  early_stopping=True, epochs=5)
+        with tempfile.TemporaryDirectory() as directory:
+            kwargs = dict(n_splits=2, model_config=self.model_config, train_config=stopped_config,
+                          preprocess_config=self.preprocess, output_dir=directory, verbose=False)
+            stopped = cross_validate_vae(self.xyz, self.regions, self.demographics, self.labels, **kwargs)
+            self.assertEqual([f["completed_epochs"] for f in stopped["folds"]], [2, 2])
+            # Older versions included patience in the saved compatibility identity.
+            manifest_path = Path(directory) / "experiment.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["identity"]["training"]["patience"] = 1
+            manifest_path.write_text(json.dumps(manifest))
+            for fold in (1, 2):
+                path = Path(directory) / f"fold_{fold}.last.pt"
+                checkpoint = torch.load(path, weights_only=True)
+                checkpoint["context"]["training"]["patience"] = 1
+                atomic_torch_save(checkpoint, path)
+            resumed = cross_validate_vae(
+                self.xyz, self.regions, self.demographics, self.labels,
+                **{**kwargs, "train_config": replace(stopped_config, early_stopping=False, patience=10, epochs=3)})
+        self.assertEqual([f["completed_epochs"] for f in resumed["folds"]], [5, 5])
+        self.assertEqual([f["epochs_this_invocation"] for f in resumed["folds"]], [3, 3])
+        self.assertTrue(all(f["stop_reason"] == "epoch_target" and not f["early_stopped"] for f in resumed["folds"]))
+
+    def test_epoch_budget_can_change_during_an_interrupted_invocation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            kwargs = dict(n_splits=2, model_config=self.model_config, train_config=self.training,
+                          preprocess_config=self.preprocess, output_dir=directory, verbose=False)
+            calls = 0
+            def interrupt(*args, **kw):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise KeyboardInterrupt()
+                return fit_vae(*args, **kw)
+            with patch("mcpp.vae_training.fit_vae", side_effect=interrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    cross_validate_vae(self.xyz, self.regions, self.demographics, self.labels, **kwargs)
+            resumed = cross_validate_vae(self.xyz, self.regions, self.demographics, self.labels,
+                                         **{**kwargs, "train_config": replace(self.training, epochs=3)})
+        self.assertEqual(resumed["invocation"]["target_epochs"], [3, 3])
+        self.assertEqual([f["completed_epochs"] for f in resumed["folds"]], [3, 3])
+
+    def test_single_fold_has_exact_training_count_and_validation_only_scoring(self):
+        with patch.object(FoldScaler, "fit", wraps=FoldScaler.fit) as scaler_fit:
+            result = train_holdout_vae(
+                self.xyz, self.regions, self.demographics, self.labels, train_samples=30,
+                model_config=self.model_config, train_config=self.training,
+                preprocess_config=self.preprocess, patient_ids=np.arange(40) + 100, verbose=False)
+        self.assertEqual(len(result["folds"]), 1)
+        fold = result["folds"][0]
+        fit, validation = set(fold["fit_patient_ids"]), set(fold["score_patient_ids"])
+        self.assertEqual((len(fit), len(validation)), (30, 10))
+        self.assertFalse(fit & validation)
+        self.assertEqual(fold["early_stop_patient_ids"], fold["score_patient_ids"])
+        self.assertEqual(result["validation_probabilities"].shape, (10,))
+        self.assertEqual(result["evaluation"], "validation_holdout")
+        np.testing.assert_array_equal(np.asarray(result["scored_indices"]) + 100, sorted(fold["score_patient_ids"]))
+        np.testing.assert_array_equal(scaler_fit.call_args.args[1], self.demographics[np.asarray(fold["fit_patient_ids"]) - 100])
+
+    def test_default_holdout_and_changing_split_cannot_reuse_cv_weights(self):
+        default = train_holdout_vae(self.xyz, self.regions, self.demographics, self.labels,
+                                    model_config=self.model_config, train_config=self.training, verbose=False)
+        self.assertEqual(len(default["folds"][0]["fit_patient_ids"]), 30)
+        self.assertEqual(len(default["folds"][0]["score_patient_ids"]), 10)
+        with tempfile.TemporaryDirectory() as directory:
+            kwargs = dict(model_config=self.model_config, train_config=self.training,
+                          preprocess_config=self.preprocess, output_dir=directory, verbose=False)
+            cross_validate_vae(self.xyz, self.regions, self.demographics, self.labels, n_splits=2, **kwargs)
+            with self.assertRaisesRegex(ValueError, "settings or patient data differ"):
+                train_holdout_vae(self.xyz, self.regions, self.demographics, self.labels, **kwargs)
+
+    def test_single_fold_command_defaults_and_epoch_increase(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir, output = Path(directory) / "cohort", Path(directory) / "experiment"
+            (data_dir / "mixed_samples").mkdir(parents=True)
+            metadata = pd.DataFrame(self.demographics, columns=DEMOGRAPHIC_COLUMNS)
+            metadata["sex"] = self.labels.astype(bool)
+            metadata["MI"] = np.where(self.labels, "pMI", "healthy")
+            metadata.to_csv(data_dir / "mixed_demographics.csv", index=False)
+            development, test = train_test_split(np.arange(40), test_size=.2, stratify=metadata.MI, random_state=42)
+            expected_train, expected_val = train_test_split(development, test_size=.25,
+                                                            stratify=metadata.MI.iloc[development], random_state=42)
+            bad = {int(expected_train[0]), int(expected_val[0])}
+            for patient, label in enumerate(metadata.MI):
+                array = surface_cycle()
+                if patient in bad:
+                    array[:9, :, :3] += np.random.default_rng(patient).normal(0, 14, (9, 600, 3))
+                np.save(data_dir / "mixed_samples" / f"{patient}{label}.npy", array)
+            command = [sys.executable, str(root / "results/train_vae.py"), "--data-dir", str(data_dir),
+                       "--output-dir", str(output), "--points", "48", "--device", "cpu",
+                       "--patience", "1"]
+            env = {**os.environ, "LOKY_MAX_CPU_COUNT": "2", "OMP_NUM_THREADS": "2"}
+            first = subprocess.run(command, capture_output=True, text=True, timeout=60, env=env)
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            continued = subprocess.run(command + ["--epochs", "3"], capture_output=True, text=True, timeout=60, env=env)
+            self.assertEqual(continued.returncode, 0, continued.stdout + continued.stderr)
+            report = json.loads((output / "mi_classification_report.json").read_text())
+            saved_split = json.loads((output / "holdout_results.json").read_text())
+            predictions = pd.read_csv(output / "mi_predictions.csv")
+            self.assertFalse((output / "cv_results.json").exists())
+            self.assertFalse((output / "fold_2.last.pt").exists())
+        self.assertEqual(report["training_patients_per_fold"], [23])
+        self.assertEqual(report["validation_patients_per_fold"], [7])
+        self.assertEqual(report["original_split_counts"], {"train": 24, "validation": 8, "test": 8})
+        self.assertEqual(set(saved_split["folds"][0]["fit_patient_ids"]), set(expected_train) - bad)
+        self.assertEqual(set(saved_split["folds"][0]["score_patient_ids"]), set(expected_val) - bad)
+        self.assertEqual(set(saved_split["test_patient_ids_excluded"]), set(test))
+        self.assertEqual(report["n_patients"], 7)
+        self.assertEqual(report["completed_epochs_per_fold"], [4])
+        self.assertEqual(report["stop_reasons"], ["epoch_target"])
+        self.assertFalse(report["early_stopping_enabled"])
+        self.assertIn("Single fold: train 23, validation 7", first.stdout)
+        self.assertIn("Validation MI classification:", continued.stdout)
+        self.assertNotIn("out-of-fold patients", continued.stdout)
+        self.assertEqual(len(predictions), 7)
+        self.assertAlmostEqual(report["metrics"]["accuracy"], accuracy_score(predictions.true_MI, predictions.predicted_MI))
 
     def test_missing_resume_checkpoint_cannot_silently_reset_a_fold(self):
         with tempfile.TemporaryDirectory() as directory:

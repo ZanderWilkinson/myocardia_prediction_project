@@ -55,13 +55,31 @@ python -m pip install -e .
 python results/train_vae.py
 ```
 
-The default command completes a **one-epoch-per-fold, five-fold** experiment on
-the development cohort. It prints overall patient-level **pMI F1 and accuracy**
-from pooled out-of-fold predictions, plus macro F1, balanced accuracy and AUC.
-Each patient is scored by a model that used that patient in neither fitting nor
-early stopping. These measure the actual healthy-versus-pMI diagnosis from the
-classification head. One epoch is an initial baseline; `--epochs` specifies
-additional epochs per fold for each completed invocation.
+The default command trains **one model for one epoch**, preserving the original
+stratified **60:20:20 split before frame-quality filtering** (seed 42). It starts
+with 540 training, 180 validation and 180 final-test patients. Excluding 19
+training and 6 validation cycles leaves **521 training, 174 validation and 180
+held-out test patients**. Exclusions never move patients between those splits.
+
+For the NVIDIA GPU machine and a longer single-fold experiment:
+
+```bash
+python results/train_vae.py --experiment mi-vae-single --folds 1 --epochs 100000 --device cuda
+```
+
+Use a new name when changing an existing two-fold experiment into a single-fold
+split. Its old training and validation memberships cannot be safely reused.
+`--epochs` adds the requested epochs per model to a completed experiment.
+Early stopping is **disabled by default**, including when resuming an older
+checkpoint that previously stopped early. Enable it explicitly with
+`--early-stopping --patience 10`. The logs print the saved epoch, target epoch,
+early-stopping setting and actual reason for stopping.
+
+Validation **pMI F1 and accuracy**, macro F1, balanced accuracy and AUC are
+reported on validation patients only. This holdout selects the best model, so
+its scores are validation scores, not independent test or out-of-fold scores.
+For cross-validation, set `--folds 2` or higher: the original nested holdout and
+pooled out-of-fold reporting remain available.
 
 The default experiment is named `default` and lives at
 `results/vae_training/default/`. Matching names resume automatically:
@@ -90,11 +108,13 @@ intact. Abrupt interruption can lose progress since the last checkpoint (up to
 
 If an invocation is interrupted, repeat the same command: its original per-fold
 targets are finished, and folds already at their target are not retrained.
-Only after that invocation completes will another call add more epochs. Early
-stopping remains in force across calls. Data, patient membership, split settings,
+Increasing `--epochs` while it is unfinished extends that invocation's targets;
+it does not silently ignore the new value. After completion, the next call adds
+more epochs. Early-stopping history is restored, but only stops training when
+`--early-stopping` is enabled. Data, patient membership, split settings,
 model architecture, batch size and optimization settings must match; use a new
-experiment name for different settings. Device, precision, CPU thread count and
-checkpoint cadence may change, but bitwise reproducibility across different
+experiment name for different settings. Device, precision, CPU thread count,
+early-stopping controls and checkpoint cadence may change, but bitwise reproducibility across different
 hardware is not guaranteed. Concurrent writers to one experiment are blocked.
 Older inference-only output directories cannot restore optimizer state and are
 preserved; start a new named experiment instead.
@@ -102,8 +122,11 @@ preserved; start a new named experiment instead.
 `experiment.json` records experiment identity, cumulative epoch counts and the
 current invocation. `mi_classification_report.json`
 contains the overall scores, per-class precision/recall/F1, and confusion matrix;
-`mi_predictions.csv` contains each patient's true MI diagnosis, predicted
-diagnosis, pMI probability, and scoring fold. Final test patients remain held out.
+`mi_predictions.csv` contains each scored patient's true MI diagnosis, predicted
+diagnosis, pMI probability, and scoring fold. In single-fold mode it contains
+validation patients only; `holdout_results.json` records both memberships and
+`validation_predictions.npz` saves their probabilities and latents. CV mode
+uses `cv_results.json` and `oof_predictions.npz` instead.
 
 The default model has **10,389,281 trainable parameters**, a **20-dimensional
 Gaussian latent space**, eight attention heads, and width 384. Each cycle starts
@@ -170,9 +193,10 @@ would erase contraction and is deliberately avoided.
 
 Training minimizes mean XYZ MSE + `beta * mean latent KL` + binary classification
 loss. `beta` warms to 0.01 over ten epochs; AdamW, gradient clipping, training-only
-class weights and early stopping on inner validation classification loss are
-enabled. Defaults are one epoch per fold, batch size 8, learning rate 0.0003 and patience
-10. GPU (CUDA), Apple GPU (MPS), or CPU is selected automatically when available.
+class weights and best-model selection on validation classification loss are
+enabled. Defaults are one model, one epoch, batch size 8, learning rate 0.0003,
+and no early stopping. Optional early stopping defaults to patience 10.
+GPU (CUDA), Apple GPU (MPS), or CPU is selected automatically when available.
 Use `--device mps` to request the Mac GPU explicitly. MPS requires GPU access;
 restricted processes can report it unavailable even on a supported Mac.
 On an NVIDIA machine, install a CUDA-enabled PyTorch build using the
@@ -201,7 +225,8 @@ Training scores come from the training pass; validation scores use the model
 at the end of the epoch with dropout disabled.
 
 The runner excludes the same 20% patient test split used by `DataSet` (seed 42).
-Five stratified outer folds use the remaining 80%; each fold has its own inner
+With `--folds 2` or more, stratified outer folds use the remaining usable
+patients; each fold has its own inner
 15% holdout for early stopping. Model weights, optimizer, geometry scaling and
 demographic scaling are fitted afresh per fold. Outer fold patients are used
 only for scoring. The runner never loads final test point clouds. Using these

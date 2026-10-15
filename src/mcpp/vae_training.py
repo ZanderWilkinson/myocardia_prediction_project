@@ -17,7 +17,7 @@ from .vae import CardiacVAE, VAEConfig, vae_loss
 from .vae_data import DEMOGRAPHIC_COLUMNS, PreprocessConfig, prepare_arrays
 from .vae_experiments import (array_signature, atomic_json_save, atomic_torch_save,
                               begin_invocation, capture_rng, experiment_lock,
-                              restore_rng, training_identity)
+                              restore_rng, training_identity, canonical_identity)
 
 
 @dataclass(frozen=True)
@@ -37,6 +37,7 @@ class TrainConfig:
     cpu_threads: int = 4
     amp: bool = True  # CUDA FP16 autocast + gradient scaling; CPU/MPS stay FP32.
     checkpoint_every: int = 100
+    early_stopping: bool = False
 
 
 @dataclass
@@ -222,7 +223,7 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
                    "extra": checkpoint_context}
         if checkpoint_path.exists():
             saved = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-            if saved.get("checkpoint_version") != 1 or saved.get("context") != context:
+            if saved.get("checkpoint_version") != 1 or canonical_identity(saved.get("context")) != canonical_identity(context):
                 raise ValueError("Checkpoint does not match the model, training settings, patient data or split.")
             if saved["epoch"] > c.epochs:
                 raise ValueError("Requested epoch target is earlier than the saved checkpoint.")
@@ -251,7 +252,10 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
         start_epoch = last_epoch
         if verbose:
             print(f"Resuming saved epoch {last_epoch}; target {c.epochs}; best epoch {best_epoch}.", flush=True)
-    target_epoch = last_epoch if stale >= c.patience else c.epochs
+    if verbose:
+        print(f"Early stopping: {'enabled (patience ' + str(c.patience) + ')' if c.early_stopping else 'disabled'}; "
+              f"saved epoch {last_epoch}, requested target {c.epochs}.", flush=True)
+    target_epoch = last_epoch if c.early_stopping and stale >= c.patience else c.epochs
     for epoch in range(last_epoch + 1, target_epoch + 1):
         started = time.monotonic()
         beta = c.beta * min(1., epoch / max(1, c.kl_warmup_epochs))
@@ -320,7 +324,7 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
             stale += 1
         last_epoch = epoch
         if checkpoint_path is not None and (
-            epoch % c.checkpoint_every == 0 or epoch == target_epoch or stale >= c.patience
+            epoch % c.checkpoint_every == 0 or epoch == target_epoch or (c.early_stopping and stale >= c.patience)
         ):
             atomic_torch_save({
                 "checkpoint_version": 1, "context": context, "model_config": asdict(model_config),
@@ -330,15 +334,21 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
                 "best_state_dict": best_state, "best_epoch": best_epoch, "stale": stale,
                 "rng": capture_rng(device, train_loader, validation_loader),
             }, checkpoint_path)
-        if stale >= c.patience:
+        if c.early_stopping and stale >= c.patience:
             break
     model.load_state_dict(best_state)
     model.eval()
+    early_stopped = c.early_stopping and stale >= c.patience
+    if verbose:
+        print(f"Stopped at epoch {last_epoch}: "
+              f"{'validation loss did not improve within patience' if early_stopped else 'requested epoch target reached'}; "
+              f"best validation epoch {best_epoch}.", flush=True)
     return model, scaler, {"best_epoch": best_epoch, "history": history,
                            "device": str(device), "parameter_count": model.parameter_count(),
                            "device_name": device_name, "amp_enabled": amp_enabled,
                            "completed_epochs": last_epoch, "epochs_this_invocation": last_epoch - start_epoch,
-                           "early_stopped": stale >= c.patience,
+                           "early_stopped": early_stopped,
+                           "stop_reason": "early_stopping" if early_stopped else "epoch_target",
                            "positive_class_weight": float(pos_weight)}
 
 
@@ -394,10 +404,30 @@ def cross_validate_vae(xyz, regions, demographics, labels, *, output_dir=None,
         raise RuntimeError("This experiment is already being trained by another process.") from exc
 
 
+def train_holdout_vae(xyz, regions, demographics, labels, *, train_samples=None,
+                      validation_fraction=.25, train_indices=None, validation_indices=None, **kwargs):
+    """One model, using the development cohort's validation holdout for scoring.
+
+    By default 75% of development patients fit the model (60:20:20 overall when
+    the final 20% is held out). The CLI supplies fixed indices to preserve the
+    original split before quality exclusions. Validation never fits the scalers.
+    These validation scores are used for model selection and are not OOF scores.
+    """
+    result = cross_validate_vae(xyz, regions, demographics, labels, n_splits=1,
+                                _holdout=True, train_samples=train_samples,
+                                _holdout_fraction=validation_fraction,
+                                _holdout_train=train_indices, _holdout_validation=validation_indices, **kwargs)
+    result["validation_probabilities"] = result.pop("oof_probabilities")
+    result["validation_latent_means"] = result.pop("oof_latent_means")
+    result["validation_metrics"] = result.pop("oof_metrics")
+    return result
+
+
 def _cross_validate_vae(xyz, regions, demographics, labels, *, n_splits=5,
                        model_config=VAEConfig(), train_config=TrainConfig(),
                        preprocess_config=PreprocessConfig(), output_dir=None, patient_ids=None,
-                       verbose=True, experiment_name="default"):
+                       verbose=True, experiment_name="default", _holdout=False, train_samples=None,
+                       _holdout_fraction=.25, _holdout_train=None, _holdout_validation=None):
     """Stratified patient CV; inner holdout stops training, outer fold scores once.
 
     All supplied patients are development patients; the caller must withhold
@@ -405,7 +435,8 @@ def _cross_validate_vae(xyz, regions, demographics, labels, *, n_splits=5,
     demographic scaling are fitted afresh on each fold's inner training set.
     """
     _validate_arrays(xyz, regions, demographics, labels, model_config)
-    if n_splits < 2 or np.unique(labels).size != 2 or np.bincount(labels).min() < n_splits:
+    if ((_holdout and n_splits != 1) or (not _holdout and n_splits < 2)
+            or np.unique(labels).size != 2 or np.bincount(labels).min() < max(2, n_splits)):
         raise ValueError("Each of the two classes needs at least n_splits patients (n_splits>=2).")
     if not 0 < train_config.inner_validation_fraction < 1:
         raise ValueError("inner_validation_fraction must lie between zero and one.")
@@ -414,6 +445,36 @@ def _cross_validate_vae(xyz, regions, demographics, labels, *, n_splits=5,
     patient_ids = np.arange(len(labels)) if patient_ids is None else np.asarray(patient_ids)
     if len(patient_ids) != len(labels) or len(np.unique(patient_ids)) != len(labels):
         raise ValueError("Supply exactly one unique patient ID per cycle.")
+    if _holdout:
+        if not 0 < _holdout_fraction < 1:
+            raise ValueError("validation_fraction must be between zero and one.")
+        if train_samples is not None and (train_samples < 2 or train_samples > len(labels) - 2):
+            raise ValueError("train_samples must leave at least two validation patients after quality exclusions.")
+        if _holdout_train is not None or _holdout_validation is not None:
+            if _holdout_train is None or _holdout_validation is None or train_samples is not None:
+                raise ValueError("Supply both fixed split indices, without train_samples.")
+            fit, score = np.asarray(_holdout_train), np.asarray(_holdout_validation)
+            combined = np.concatenate((fit, score))
+            if (fit.ndim != 1 or score.ndim != 1 or not len(fit) or not len(score)
+                    or not np.issubdtype(combined.dtype, np.integer)
+                    or not np.array_equal(np.sort(combined), np.arange(len(labels)))):
+                raise ValueError("Fixed holdout indices must partition all usable patients exactly once.")
+        else:
+            fit, score = train_test_split(
+                np.arange(len(labels)), train_size=train_samples,
+                test_size=None if train_samples is not None else _holdout_fraction,
+                stratify=labels, random_state=train_config.seed,
+            )
+        plan = [(fit, score, score)]
+    else:
+        splitter = StratifiedKFold(n_splits, shuffle=True, random_state=train_config.seed)
+        plan = []
+        for development, score in splitter.split(xyz, labels):
+            fit, stop = train_test_split(
+                development, test_size=train_config.inner_validation_fraction,
+                stratify=labels[development], random_state=train_config.seed + len(plan) + 1,
+            )
+            plan.append((fit, stop, score))
     manifest = None
     if output_dir is not None:
         identity = {"experiment_name": experiment_name, "model_config": asdict(model_config),
@@ -421,6 +482,11 @@ def _cross_validate_vae(xyz, regions, demographics, labels, *, n_splits=5,
                     "input_signature": array_signature(xyz, regions, demographics, labels),
                     "patient_ids": patient_ids.tolist(), "n_splits": n_splits,
                     "demographic_columns": list(DEMOGRAPHIC_COLUMNS)}
+        if _holdout:
+            identity.update(evaluation_mode="validation_holdout", train_samples=train_samples,
+                            validation_fraction=_holdout_fraction,
+                            fit_patient_ids=patient_ids[plan[0][0]].tolist(),
+                            validation_patient_ids=patient_ids[plan[0][1]].tolist())
         manifest = begin_invocation(output_dir, identity, epochs=train_config.epochs, n_splits=n_splits)
         if verbose:
             print(f"Experiment {experiment_name!r}, invocation {manifest['invocation']['number']}: "
@@ -428,14 +494,13 @@ def _cross_validate_vae(xyz, regions, demographics, labels, *, n_splits=5,
     oof = np.full(len(labels), np.nan)
     latent = np.zeros((len(labels), model_config.latent_dim), dtype=np.float32)
     folds = []
-    splitter = StratifiedKFold(n_splits, shuffle=True, random_state=train_config.seed)
-    for fold, (development, score) in enumerate(splitter.split(xyz, labels), 1):
-        fit, stop = train_test_split(
-            development, test_size=train_config.inner_validation_fraction,
-            stratify=labels[development], random_state=train_config.seed + fold,
-        )
+    for fold, (fit, stop, score) in enumerate(plan, 1):
         if verbose:
-            print(f"Fold {fold}/{n_splits}: fit {len(fit)}, stop {len(stop)}, score {len(score)}", flush=True)
+            if _holdout:
+                print(f"Single fold: train {len(fit)}, validation {len(score)}; "
+                      "validation scores select the best model.", flush=True)
+            else:
+                print(f"Fold {fold}/{n_splits}: fit {len(fit)}, stop {len(stop)}, score {len(score)}", flush=True)
         target_epochs = manifest["invocation"]["target_epochs"][fold - 1] if manifest else train_config.epochs
         fold_config = TrainConfig(**{**asdict(train_config), "seed": train_config.seed + fold,
                                      "epochs": target_epochs})
@@ -469,8 +534,12 @@ def _cross_validate_vae(xyz, regions, demographics, labels, *, n_splits=5,
     if manifest is not None:
         manifest["invocation"]["status"] = "complete"
         atomic_json_save(manifest, output_dir / "experiment.json")
-    return {"folds": folds, "oof_probabilities": oof, "oof_latent_means": latent,
+    scored = np.flatnonzero(np.isfinite(oof))
+    return {"folds": folds, "oof_probabilities": oof[scored], "oof_latent_means": latent[scored],
+            "scored_indices": scored.tolist(),
+            "evaluation": "validation_holdout" if _holdout else "out_of_fold",
             "experiment_name": experiment_name, "invocation": manifest["invocation"] if manifest else None,
-            "oof_metrics": classification_metrics(labels, oof),
+            "oof_metrics": classification_metrics(labels[scored], oof[scored]),
             "mean_fold_metrics": {key: float(np.mean([f["metrics"][key] for f in folds])) for key in names},
-            "std_fold_metrics": {key: float(np.std([f["metrics"][key] for f in folds], ddof=1)) for key in names}}
+            "std_fold_metrics": {key: float(np.std([f["metrics"][key] for f in folds], ddof=1))
+                                 if len(folds) > 1 else 0. for key in names}}
