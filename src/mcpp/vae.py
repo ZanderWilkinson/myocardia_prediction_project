@@ -12,7 +12,7 @@ class VAEConfig:
     n_frames: int = 10
     n_points: int = 384
     n_regions: int = 3
-    latent_dim: int = 8
+    latent_dim: int = 15
     width: int = 384
     heads: int = 8
     spatial_tokens: int = 16
