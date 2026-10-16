@@ -5,6 +5,8 @@ from dataclasses import asdict
 import json
 from pathlib import Path
 import re
+import shlex
+import sys
 import time
 
 from filelock import Timeout
@@ -16,7 +18,7 @@ from mcpp.vae import VAEConfig
 from mcpp.vae_data import DEMOGRAPHIC_COLUMNS, PreprocessConfig, load_cohort
 from mcpp.vae_training import (TrainConfig, cross_validate_vae, train_holdout_vae,
                                mi_classification_report, select_device)
-from mcpp.vae_experiments import atomic_json_save, experiment_lock
+from mcpp.vae_experiments import atomic_json_save, experiment_lock, training_output_log
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,7 +44,7 @@ def main():
                         help="Opt in to validation early stopping; disabled by default so epoch requests are honoured")
     parser.add_argument("--patience", type=int, default=10, help="Non-improving epochs before optional early stopping")
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--latent-dim", type=int, default=20)
+    parser.add_argument("--latent-dim", type=int, default=8)
     parser.add_argument("--points", type=int, default=384)
     parser.add_argument("--limit-patients", type=int, help="Stratified development subset for a quick run")
     parser.add_argument("--device", default="auto", help="auto, cpu, mps, cuda or cuda:N (e.g. cuda:1)")
@@ -68,7 +70,9 @@ def main():
         args.output_dir = ROOT / "results/vae_training" / args.experiment
     try:
         with experiment_lock(args.output_dir) as run_lock:
-            run_experiment(args, device, run_lock)
+            with training_output_log(args.output_dir / "training.log"):
+                print(f"Command: {shlex.join([sys.executable, *sys.argv])}", flush=True)
+                run_experiment(args, device, run_lock)
     except Timeout:
         parser.error("This experiment is already being trained by another process.")
     except (ValueError, RuntimeError) as exc:
@@ -194,6 +198,7 @@ def run_experiment(args, device, run_lock):
           f"ROC-AUC: {metrics['roc_auc']:.4f}\n"
           f"Report: {args.output_dir / 'mi_classification_report.json'}\n"
           f"Patient predictions: {args.output_dir / 'mi_predictions.csv'}\n"
+          f"Training log: {args.output_dir / 'training.log'}\n"
           f"Final test set scored: no", flush=True)
 
 

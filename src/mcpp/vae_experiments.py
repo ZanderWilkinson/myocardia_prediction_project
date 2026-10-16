@@ -1,16 +1,65 @@
 """Atomic rolling checkpoints and identities for resumable VAE experiments."""
 
 from dataclasses import asdict
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from contextvars import ContextVar
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
 import random
+import sys
+import traceback
 from uuid import uuid4
 
 from filelock import FileLock
 import numpy as np
 import torch
+
+
+_active_log = ContextVar("vae_training_log", default=None)
+
+
+class _TeeStream:
+    def __init__(self, terminal, log):
+        self.terminal, self.log = terminal, log
+
+    def write(self, text):
+        self.terminal.write(text)
+        self.log.write(text)
+        self.log.flush()
+        return len(text)
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.terminal, name)
+
+
+@contextmanager
+def training_output_log(path):
+    """Append terminal output immediately, including errors and interrupted runs."""
+    path = Path(path).resolve()
+    if _active_log.get() == path:
+        yield
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", buffering=1) as log:
+        token = _active_log.set(path)
+        try:
+            with redirect_stdout(_TeeStream(sys.stdout, log)), redirect_stderr(_TeeStream(sys.stderr, log)):
+                print(f"\n=== Training session {datetime.now(timezone.utc).isoformat()} ===", flush=True)
+                try:
+                    yield
+                except BaseException:
+                    traceback.print_exc(file=log)
+                    raise
+        finally:
+            _active_log.reset(token)
+            log.flush()
 
 
 def experiment_lock(directory):
@@ -137,7 +186,7 @@ def begin_invocation(directory, identity, *, epochs, n_splits):
         completed = manifest["completed_epochs"]
     else:
         existing = {p.name for p in Path(directory).iterdir()}
-        if existing - {".experiment.lock", "frame_quality.json"}:
+        if existing - {".experiment.lock", "frame_quality.json", "training.log"}:
             raise ValueError("This directory contains older outputs without resumable experiment state. "
                              "Use a new experiment name or output directory.")
         number, completed = 1, [0] * n_splits

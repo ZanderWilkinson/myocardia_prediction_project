@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from .vae import CardiacVAE, VAEConfig, vae_loss
 from .vae_data import DEMOGRAPHIC_COLUMNS, PreprocessConfig, prepare_arrays
 from .vae_experiments import (array_signature, atomic_json_save, atomic_torch_save,
-                              begin_invocation, capture_rng, experiment_lock,
+                              begin_invocation, capture_rng, experiment_lock, training_output_log,
                               restore_rng, training_identity, canonical_identity)
 
 
@@ -168,7 +168,8 @@ def mi_classification_report(labels, probabilities):
 
 def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indices, *,
             model_config=VAEConfig(), train_config=TrainConfig(), verbose=True,
-            checkpoint_path=None, checkpoint_context=None):
+            checkpoint_path=None, checkpoint_context=None, validation_checkpoint_path=None,
+            preprocess_config=PreprocessConfig()):
     """Fit using only train_indices; validation selects the best MI BCE epoch.
 
     New folds initialize their own model, optimizer, class weight and scaler;
@@ -184,6 +185,8 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
     target train_config.epochs. Replace that rolling checkpoint every 100 epochs
     by default, and at invocation end or early stopping. Return the best model;
     the rolling checkpoint retains the latest weights for continued training.
+    Separately, validation_checkpoint_path retains the highest validation macro
+    F1 weights immediately on each strict improvement, including across resumes.
     """
     _validate_arrays(xyz, regions, demographics, labels, model_config)
     c = train_config
@@ -215,13 +218,17 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
         print(f"Training on {device_name} ({device}); "
               f"precision={'FP16 mixed' if amp_enabled else 'FP32'}", flush=True)
     checkpoint_path = Path(checkpoint_path) if checkpoint_path is not None else None
+    validation_checkpoint_path = Path(validation_checkpoint_path) if validation_checkpoint_path is not None else None
+    if (checkpoint_path is not None and validation_checkpoint_path is not None
+            and checkpoint_path.resolve() == validation_checkpoint_path.resolve()):
+        raise ValueError("Resume and validation-best checkpoints need different paths.")
     context, saved = None, None
-    if checkpoint_path is not None:
+    if checkpoint_path is not None or validation_checkpoint_path is not None:
         context = {"model_config": asdict(model_config), "training": training_identity(c),
                    "inputs": array_signature(xyz, regions, demographics, labels),
                    "train_indices": train_indices.tolist(), "validation_indices": validation_indices.tolist(),
                    "extra": checkpoint_context}
-        if checkpoint_path.exists():
+        if checkpoint_path is not None and checkpoint_path.exists():
             saved = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
             if saved.get("checkpoint_version") != 1 or canonical_identity(saved.get("context")) != canonical_identity(context):
                 raise ValueError("Checkpoint does not match the model, training settings, patient data or split.")
@@ -252,6 +259,36 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
         start_epoch = last_epoch
         if verbose:
             print(f"Resuming saved epoch {last_epoch}; target {c.epochs}; best epoch {best_epoch}.", flush=True)
+    best_macro_f1, best_macro_f1_epoch = -1., 0
+    if history:
+        previous_best = max(history, key=lambda r: r["validation_macro_f1"])
+        best_macro_f1, best_macro_f1_epoch = previous_best["validation_macro_f1"], previous_best["epoch"]
+
+    def save_validation_best(record, state_dict=None):
+        save_checkpoint(validation_checkpoint_path, model, scaler,
+                        preprocess_config=preprocess_config, state_dict=state_dict,
+                        metadata={"selection_metric": "validation_macro_f1", "epoch": record["epoch"],
+                                  "validation_macro_f1": record["validation_macro_f1"],
+                                  "validation_accuracy": record["validation_accuracy"],
+                                  "validation_f1_pMI": record["validation_f1_pMI"],
+                                  "validation_bce": record["validation_bce"], "context": context})
+
+    if validation_checkpoint_path is not None:
+        if validation_checkpoint_path.exists():
+            selected = torch.load(validation_checkpoint_path, map_location="cpu", weights_only=True)
+            metadata = selected["metadata"]
+            if (canonical_identity(metadata.get("context")) != canonical_identity(context)
+                    or metadata.get("selection_metric") != "validation_macro_f1"):
+                raise ValueError("Validation-best checkpoint does not match this experiment and split.")
+            best_macro_f1, best_macro_f1_epoch = metadata["validation_macro_f1"], metadata["epoch"]
+            del selected
+        elif saved is not None:
+            # Older runs only retained the BCE-best weights. Seed from those;
+            # earlier unsaved epoch weights cannot be reconstructed from history.
+            candidate = next((r for r in history if r["epoch"] == best_epoch), None)
+            if candidate is not None:
+                save_validation_best(candidate, best_state)
+                best_macro_f1, best_macro_f1_epoch = candidate["validation_macro_f1"], best_epoch
     if verbose:
         print(f"Early stopping: {'enabled (patience ' + str(c.patience) + ')' if c.early_stopping else 'disabled'}; "
               f"saved epoch {last_epoch}, requested target {c.epochs}.", flush=True)
@@ -322,6 +359,13 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
             best_state = {key: tensor.detach().cpu().clone() for key, tensor in model.state_dict().items()}
         else:
             stale += 1
+        if validation_scores["macro_f1"] > best_macro_f1:
+            if validation_checkpoint_path is not None:
+                save_validation_best(record)
+                if verbose:
+                    print(f"Saved {validation_checkpoint_path.name}: validation macro F1 "
+                          f"{validation_scores['macro_f1']:.4f} at epoch {epoch}.", flush=True)
+            best_macro_f1, best_macro_f1_epoch = validation_scores["macro_f1"], epoch
         last_epoch = epoch
         if checkpoint_path is not None and (
             epoch % c.checkpoint_every == 0 or epoch == target_epoch or (c.early_stopping and stale >= c.patience)
@@ -344,6 +388,9 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
               f"{'validation loss did not improve within patience' if early_stopped else 'requested epoch target reached'}; "
               f"best validation epoch {best_epoch}.", flush=True)
     return model, scaler, {"best_epoch": best_epoch, "history": history,
+                           "best_validation_macro_f1": best_macro_f1,
+                           "best_validation_macro_f1_epoch": best_macro_f1_epoch,
+                           "validation_best_checkpoint": str(validation_checkpoint_path) if validation_checkpoint_path else None,
                            "device": str(device), "parameter_count": model.parameter_count(),
                            "device_name": device_name, "amp_enabled": amp_enabled,
                            "completed_epochs": last_epoch, "epochs_this_invocation": last_epoch - start_epoch,
@@ -352,7 +399,7 @@ def fit_vae(xyz, regions, demographics, labels, train_indices, validation_indice
                            "positive_class_weight": float(pos_weight)}
 
 
-def save_checkpoint(path, model, scaler, *, preprocess_config=PreprocessConfig(), metadata=None):
+def save_checkpoint(path, model, scaler, *, preprocess_config=PreprocessConfig(), metadata=None, state_dict=None):
     """Save inference weights together with every transform and ordered schema."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -360,7 +407,8 @@ def save_checkpoint(path, model, scaler, *, preprocess_config=PreprocessConfig()
                 "preprocess_config": asdict(preprocess_config),
                 "demographic_columns": list(DEMOGRAPHIC_COLUMNS),
                 "class_mapping": {"healthy": 0, "pMI": 1}, "metadata": metadata or {},
-                "state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()}}, path)
+                "state_dict": {key: value.detach().cpu() for key, value in
+                               (model.state_dict() if state_dict is None else state_dict).items()}}, path)
 
 
 def load_checkpoint(path, *, device="auto"):
@@ -398,8 +446,9 @@ def cross_validate_vae(xyz, regions, demographics, labels, *, output_dir=None,
     lock = run_lock if run_lock is not None else experiment_lock(output_dir)
     try:
         with lock:
-            return _cross_validate_vae(xyz, regions, demographics, labels,
-                                       output_dir=Path(output_dir), experiment_name=experiment_name, **kwargs)
+            with training_output_log(Path(output_dir) / "training.log"):
+                return _cross_validate_vae(xyz, regions, demographics, labels,
+                                           output_dir=Path(output_dir), experiment_name=experiment_name, **kwargs)
     except Timeout as exc:
         raise RuntimeError("This experiment is already being trained by another process.") from exc
 
@@ -509,6 +558,9 @@ def _cross_validate_vae(xyz, regions, demographics, labels, *, n_splits=5,
             model_config=model_config, train_config=fold_config, verbose=verbose,
             checkpoint_path=output_dir / f"fold_{fold}.last.pt" if output_dir is not None else None,
             checkpoint_context={"experiment_name": experiment_name, "preprocess_config": asdict(preprocess_config)},
+            validation_checkpoint_path=(output_dir / ("val_best.pt" if _holdout else f"fold_{fold}.val_best.pt")
+                                        if output_dir is not None else None),
+            preprocess_config=preprocess_config,
         )
         oof[score], latent[score] = predict_prepared(
             model, scaler, xyz[score], regions[score], demographics[score],

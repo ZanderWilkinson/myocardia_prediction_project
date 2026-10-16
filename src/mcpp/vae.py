@@ -12,7 +12,7 @@ class VAEConfig:
     n_frames: int = 10
     n_points: int = 384
     n_regions: int = 3
-    latent_dim: int = 20
+    latent_dim: int = 8
     width: int = 384
     heads: int = 8
     spatial_tokens: int = 16
@@ -45,7 +45,7 @@ class AxialBlock(nn.Module):
 
 
 class CardiacVAE(nn.Module):
-    """XYZ + anatomical IDs -> 20-D Gaussian; [mean, demographics] -> MI logit.
+    """XYZ + anatomical IDs -> Gaussian latent; [mean, demographics] -> MI logit.
 
     Learned spatial queries attend to all sampled points in each frame. Axial
     blocks gather space/time interactions with short sequences. The decoder

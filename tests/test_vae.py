@@ -24,7 +24,7 @@ from mcpp.vae_data import (DEMOGRAPHIC_COLUMNS, PreprocessConfig, UnrepairableCy
 from mcpp.vae_training import (FoldScaler, TrainConfig, cross_validate_vae, fit_vae,
                                 load_checkpoint, predict_patients, predict_prepared, save_checkpoint,
                                 mi_classification_report, select_device, train_holdout_vae)
-from mcpp.vae_experiments import atomic_torch_save, experiment_lock
+from mcpp.vae_experiments import atomic_torch_save, experiment_lock, training_output_log
 
 
 def cycle(points=24, seed=7):
@@ -199,6 +199,7 @@ class ModelTests(unittest.TestCase):
 
     def test_default_parameter_budget(self):
         model = CardiacVAE()
+        self.assertEqual(model.config.latent_dim, 8)
         self.assertTrue(9_000_000 <= model.parameter_count() <= 11_000_000, model.parameter_count())
 
     def test_demographics_only_affect_head_and_eval_is_deterministic(self):
@@ -206,7 +207,7 @@ class ModelTests(unittest.TestCase):
         a = self.model(self.xyz, self.regions, self.demographics)
         b = self.model(self.xyz, self.regions, self.demographics + 10)
         c = self.model(self.xyz, self.regions, self.demographics)
-        self.assertEqual(a["mu"].shape, (2, 20))
+        self.assertEqual(a["mu"].shape, (2, 8))
         self.assertEqual(a["reconstruction"].shape, self.xyz.shape)
         for key in ("mu", "logvar", "reconstruction"):
             torch.testing.assert_close(a[key], b[key], rtol=0, atol=0)
@@ -297,6 +298,25 @@ class MIReportTests(unittest.TestCase):
 
 
 class AtomicCheckpointTests(unittest.TestCase):
+    def test_training_log_flushes_appends_and_retains_errors_without_duplicate_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "training.log"
+            terminal = io.StringIO()
+            with redirect_stdout(terminal):
+                with training_output_log(path):
+                    with training_output_log(path):
+                        print("epoch 1: validation macro F1=0.8")
+                        self.assertIn("epoch 1:", path.read_text())
+                with self.assertRaisesRegex(RuntimeError, "training failed"):
+                    with training_output_log(path):
+                        print("device warning", file=sys.stderr)
+                        raise RuntimeError("training failed")
+            log = path.read_text()
+            self.assertEqual(log.count("epoch 1:"), 1)
+            self.assertEqual(log.count("=== Training session"), 2)
+            self.assertIn("device warning", log)
+            self.assertIn("RuntimeError: training failed", log)
+
     def test_failed_replacement_preserves_previous_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "rolling.pt"
@@ -359,7 +379,7 @@ class TrainingTests(unittest.TestCase):
             scored.extend(c)
         self.assertEqual(sorted(scored), list(range(100, 140)))
         self.assertTrue(np.isfinite(result["oof_probabilities"]).all())
-        self.assertEqual(result["oof_latent_means"].shape, (40, 20))
+        self.assertEqual(result["oof_latent_means"].shape, (40, 8))
 
     def test_epoch_metrics_pool_patient_predictions_and_match_validation(self):
         batches = []
@@ -432,7 +452,14 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual(continued_cv["invocation"]["number"], 2)
             self.assertIn("Resuming saved epoch 1; target 2", continued.stdout)
             self.assertEqual(sorted(p.name for p in output.glob("*.pt")),
-                             ["fold_1.last.pt", "fold_1.pt", "fold_2.last.pt", "fold_2.pt"])
+                             ["fold_1.last.pt", "fold_1.pt", "fold_1.val_best.pt",
+                              "fold_2.last.pt", "fold_2.pt", "fold_2.val_best.pt"])
+            log = (output / "training.log").read_text()
+            self.assertEqual(log.count("=== Training session"), 2)
+            self.assertEqual(log.count("epoch 001:"), 2)
+            self.assertEqual(log.count("epoch 002:"), 2)
+            self.assertIn("Overall MI classification:", log)
+            self.assertEqual(cv["model_config"]["latent_dim"], 8)
         self.assertEqual(cv["train_config"]["epochs"], 1)
         self.assertTrue(all(len(f["history"]) == 1 for f in cv["folds"]))
         self.assertEqual(report["n_patients"], 32)
@@ -447,6 +474,99 @@ class TrainingTests(unittest.TestCase):
         self.assertIn("Overall MI classification:", completed.stdout)
         self.assertIn("F1 (pMI):", completed.stdout)
         self.assertIn("Accuracy:", completed.stdout)
+
+    @staticmethod
+    def _scores_with_validation_f1(values):
+        scores = iter(values)
+        calls = 0
+        def classify(*args):
+            nonlocal calls
+            calls += 1
+            return {"accuracy": .5, "f1_pMI": .5,
+                    "macro_f1": .5 if calls % 2 else next(scores)}
+        return classify
+
+    def test_validation_best_replaces_only_on_strict_f1_improvement_across_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            best = Path(directory) / "val_best.pt"
+            kwargs = dict(model_config=self.model_config, preprocess_config=self.preprocess,
+                          checkpoint_path=Path(directory) / "rolling.pt",
+                          validation_checkpoint_path=best, verbose=False)
+            args = (self.xyz, self.regions, self.demographics, self.labels, np.arange(30), np.arange(30, 40))
+            with patch("mcpp.vae_training._classification_scores",
+                       side_effect=self._scores_with_validation_f1([.8, .4])), \
+                 patch("mcpp.vae_training.save_checkpoint", wraps=save_checkpoint) as save:
+                fit_vae(*args, train_config=replace(self.training, epochs=2), **kwargs)
+                self.assertEqual([c.kwargs["metadata"]["epoch"] for c in save.call_args_list], [1])
+            with patch("mcpp.vae_training._classification_scores",
+                       side_effect=self._scores_with_validation_f1([.8, .9, .3])), \
+                 patch("mcpp.vae_training.save_checkpoint", wraps=save_checkpoint) as save:
+                _, _, report = fit_vae(*args, train_config=replace(self.training, epochs=5), **kwargs)
+                self.assertEqual([c.kwargs["metadata"]["epoch"] for c in save.call_args_list], [4])
+            model, scaler, saved = load_checkpoint(best, device="cpu")
+            self.assertEqual(saved["metadata"]["epoch"], 4)
+            self.assertEqual(saved["metadata"]["validation_macro_f1"], .9)
+            self.assertEqual(saved["preprocess_config"]["n_points"], 12)
+            self.assertEqual(report["best_validation_macro_f1_epoch"], 4)
+            self.assertEqual(report["completed_epochs"], 5)
+            probability, latent = predict_prepared(model, scaler, self.xyz[30:], self.regions[30:], self.demographics[30:])
+            self.assertTrue(np.isfinite(probability).all())
+            self.assertEqual(latent.shape, (10, 8))
+            self.assertEqual(sorted(p.name for p in Path(directory).iterdir()), ["rolling.pt", "val_best.pt"])
+
+    def test_interrupted_best_checkpoint_can_be_newer_than_rolling_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            best, rolling = Path(directory) / "val_best.pt", Path(directory) / "rolling.pt"
+            kwargs = dict(model_config=self.model_config, preprocess_config=self.preprocess,
+                          checkpoint_path=rolling, validation_checkpoint_path=best, verbose=False)
+            args = (self.xyz, self.regions, self.demographics, self.labels, np.arange(30), np.arange(30, 40))
+            with patch("mcpp.vae_training._classification_scores",
+                       side_effect=self._scores_with_validation_f1([.5])):
+                fit_vae(*args, train_config=self.training, **kwargs)
+            calls = 0
+            def interrupt(*args, **kw):
+                nonlocal calls
+                calls += 1
+                if calls == 5:  # After epoch 2 was evaluated and saved, before epoch 3 finishes.
+                    raise KeyboardInterrupt()
+                return vae_loss(*args, **kw)
+            with patch("mcpp.vae_training.vae_loss", side_effect=interrupt), \
+                 patch("mcpp.vae_training._classification_scores",
+                       side_effect=self._scores_with_validation_f1([.9])):
+                with self.assertRaises(KeyboardInterrupt):
+                    fit_vae(*args, train_config=replace(self.training, epochs=5), **kwargs)
+            self.assertEqual(torch.load(rolling, weights_only=True)["epoch"], 1)
+            self.assertEqual(torch.load(best, weights_only=True)["metadata"]["epoch"], 2)
+            previous = best.read_bytes()
+            with patch("mcpp.vae_training._classification_scores",
+                       side_effect=self._scores_with_validation_f1([.6, .7])):
+                _, _, report = fit_vae(*args, train_config=replace(self.training, epochs=3), **kwargs)
+            self.assertEqual(best.read_bytes(), previous)
+            self.assertEqual(report["best_validation_macro_f1"], .9)
+            self.assertEqual(report["best_validation_macro_f1_epoch"], 2)
+
+    def test_legacy_resume_seeds_validation_best_from_retained_bce_weights(self):
+        with tempfile.TemporaryDirectory() as directory:
+            best, rolling = Path(directory) / "val_best.pt", Path(directory) / "rolling.pt"
+            kwargs = dict(model_config=replace(self.model_config, latent_dim=20),
+                          preprocess_config=self.preprocess, checkpoint_path=rolling, verbose=False)
+            args = (self.xyz, self.regions, self.demographics, self.labels, np.arange(30), np.arange(30, 40))
+            _, _, initial = fit_vae(*args, train_config=replace(self.training, epochs=2), **kwargs)
+            _, _, resumed = fit_vae(*args, train_config=replace(self.training, epochs=2),
+                                     validation_checkpoint_path=best, **kwargs)
+            loaded, scaler, saved = load_checkpoint(best, device="cpu")
+            self.assertEqual(loaded.config.latent_dim, 20)
+            self.assertEqual(saved["metadata"]["epoch"], initial["best_epoch"])
+            self.assertEqual(resumed["best_validation_macro_f1"],
+                             initial["history"][initial["best_epoch"] - 1]["validation_macro_f1"])
+            probabilities, _ = predict_prepared(loaded, scaler, self.xyz[30:], self.regions[30:], self.demographics[30:])
+            self.assertAlmostEqual(saved["metadata"]["validation_macro_f1"],
+                                   f1_score(self.labels[30:], probabilities >= .5, average="macro", zero_division=0))
+            self.assertAlmostEqual(saved["metadata"]["validation_accuracy"],
+                                   accuracy_score(self.labels[30:], probabilities >= .5))
+            with self.assertRaisesRegex(ValueError, "Validation-best checkpoint does not match"):
+                fit_vae(*args, train_config=self.training, model_config=self.model_config,
+                        validation_checkpoint_path=best, verbose=False)
 
     def test_rolling_checkpoint_interval_and_exact_cpu_resume(self):
         train, validation = np.arange(30), np.arange(30, 40)
@@ -681,6 +801,11 @@ class TrainingTests(unittest.TestCase):
             report = json.loads((output / "mi_classification_report.json").read_text())
             saved_split = json.loads((output / "holdout_results.json").read_text())
             predictions = pd.read_csv(output / "mi_predictions.csv")
+            best = torch.load(output / "val_best.pt", weights_only=True)
+            self.assertEqual(best["model_config"]["latent_dim"], 8)
+            self.assertEqual(best["metadata"]["validation_macro_f1"],
+                             max(r["validation_macro_f1"] for r in saved_split["folds"][0]["history"]))
+            self.assertIn("Validation MI classification:", (output / "training.log").read_text())
             self.assertFalse((output / "cv_results.json").exists())
             self.assertFalse((output / "fold_2.last.pt").exists())
         self.assertEqual(report["training_patients_per_fold"], [23])

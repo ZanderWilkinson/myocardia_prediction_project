@@ -96,7 +96,24 @@ Each fold keeps one rolling `fold_N.last.pt` training checkpoint. It replaces
 the previous checkpoint **every 100 epochs**, plus at the end of an invocation
 or early stopping, so even one-epoch experiments can resume. Use
 `--checkpoint-every` to change the interval. Previous periodic copies are not
-retained. `fold_N.pt` holds the best validation model for inference.
+retained. `fold_N.pt` holds the lowest-validation-BCE model for inference and
+continues to supply the final classification report.
+
+A separate **`val_best.pt`** saves the highest **validation macro F1** model in
+single-fold mode; CV keeps `fold_N.val_best.pt` per fold. It is replaced
+atomically **immediately whenever macro F1 strictly improves**, independent of
+the 100-epoch resume cadence. Ties keep the earlier model. Its metadata records
+the epoch, macro F1, accuracy and pMI F1; preprocessing and train-fitted scaling
+are included, so it works with `load_checkpoint` and `predict_patients`.
+The best score persists across resumed runs, including when this file is newer
+than the last rolling checkpoint. On resuming an older experiment without a
+macro-F1 checkpoint, selection starts with its retained BCE-best weights and
+then compares new epochs; earlier unsaved weights cannot be recovered.
+
+**`training.log`** appends the terminal output for every invocation, including
+epoch metrics, summaries, warnings and failures. Output is flushed as it is
+written, so completed epoch lines survive interruption between checkpoints.
+This also applies to notebook/API training with an output directory.
 
 Resume restores the latest weights, AdamW state, mixed-precision gradient scaler,
 train-fitted input scaling, RNG and shuffle states, epoch history, KL warmup
@@ -128,8 +145,10 @@ validation patients only; `holdout_results.json` records both memberships and
 `validation_predictions.npz` saves their probabilities and latents. CV mode
 uses `cv_results.json` and `oof_predictions.npz` instead.
 
-The default model has **10,389,281 trainable parameters**, a **20-dimensional
-Gaussian latent space**, eight attention heads, and width 384. Each cycle starts
+The default model has **9,641,225 trainable parameters**, an **8-dimensional
+Gaussian latent space**, eight attention heads, and width 384.
+Changing an existing 20-dimensional experiment to 8 requires a new experiment
+name. Use `--latent-dim 20` to continue its original architecture. Each cycle starts
 as `(10, 18000, 4)` with XYZ and categorical anatomical region IDs. We retain
 128 points per region (384 per frame), using the same sampled indices across
 all frames. Sixteen learned spatial queries attend to the points in each frame;
