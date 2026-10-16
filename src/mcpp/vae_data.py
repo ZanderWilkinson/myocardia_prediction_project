@@ -247,18 +247,20 @@ def prepare_arrays(arrays, config=PreprocessConfig()):
             [p[2] for p in prepared])
 
 
-def load_cohort(directory, indices=None, config=PreprocessConfig(), *, exclude_unrepairable=True):
+def load_cohort(directory, indices=None, config=PreprocessConfig(), *, exclude_unrepairable=True,
+                metadata_filename="mixed_demographics.csv", samples_subdir="mixed_samples",
+                labelled_filenames=True):
     """Read only selected patients, one file at a time, without the eager loader.
 
-    Supports this project's training_data/mixed_samples naming. The runner
-    excludes its held-out patients before calling this function.
+    Defaults to training_data/mixed_samples naming. For the external final set,
+    use test.csv, test_samples and labelled_filenames=False (0.npy, 1.npy, ...).
     Cycles with a majority of suspect frames are excluded by default, with their
     full audit and reason retained. Pass exclude_unrepairable=False to raise.
     Audit includes excluded patients; arrays contain only retained patients in
     the same relative order. Use the non-excluded audit records for patient IDs.
     """
     directory = Path(directory)
-    metadata = pd.read_csv(directory / "mixed_demographics.csv")
+    metadata = pd.read_csv(directory / metadata_filename)
     indices = np.arange(len(metadata)) if indices is None else np.asarray(indices, dtype=int)
     rows = metadata.iloc[indices]
     if not rows.MI.isin(["healthy", "pMI"]).all():
@@ -273,7 +275,7 @@ def load_cohort(directory, indices=None, config=PreprocessConfig(), *, exclude_u
         raise ValueError("Demographics must be numeric and complete, including a boolean sex value.")
     prepared, kept, audit = [], [], []
     for position, (index, label) in enumerate(zip(indices, rows.MI)):
-        path = directory / "mixed_samples" / f"{index}{label}.npy"
+        path = directory / samples_subdir / f"{index}{label if labelled_filenames else ''}.npy"
         try:
             xyz, regions, record = prepare_patient(np.load(path, mmap_mode="r", allow_pickle=False), config)
         except UnrepairableCycleError as exc:

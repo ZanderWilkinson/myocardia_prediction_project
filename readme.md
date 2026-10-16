@@ -115,6 +115,35 @@ epoch metrics, summaries, warnings and failures. Output is flushed as it is
 written, so completed epoch lines survive interruption between checkpoints.
 This also applies to notebook/API training with an output directory.
 
+Evaluate the selected macro-F1 checkpoint on the original held-out 20%:
+
+```bash
+python results/evaluate_vae.py --checkpoint results/vae_training/mi-vae-z8/val_best.pt
+```
+
+Add **`--final`** to evaluate **all 100 external `test_samples` patients** instead:
+
+```bash
+python results/evaluate_vae.py --checkpoint results/vae_training/mi-vae-z8/val_best.pt --final
+```
+
+Replace the experiment name as needed. Device selection is automatic; append
+`--device cuda`, `--device mps`, or `--device cpu` to select explicitly.
+`--data-dir` defaults to `data/training_data` normally and `data/test_samples`
+with `--final`. The latter uses labels and demographics from `test.csv` and
+clouds from `test_samples/0.npy`, `1.npy`, etc., preserving original patient
+IDs (900–999) in predictions alongside the sample file indices.
+
+Evaluation restores the checkpoint's preprocessing, train-fitted scaling and
+weights, uses a fixed 0.5 cutoff, and performs no training. The checkpoint must
+remain alongside its `experiment.json`. It prints pMI F1, accuracy, macro F1,
+balanced accuracy and ROC-AUC. Reports, patient predictions and frame-quality
+audits go into `<experiment>/test_evaluation/val_best/`, or
+`<experiment>/final_evaluation/val_best/` with `--final`; training reports stay
+unchanged. The existing quality policy applies to every input cycle, and any
+excluded cycles are listed with the scored/total patient counts. CV checkpoints
+(`fold_N.val_best.pt`) also work, scoring the selected fold's model individually.
+
 Resume restores the latest weights, AdamW state, mixed-precision gradient scaler,
 train-fitted input scaling, RNG and shuffle states, epoch history, KL warmup
 position, best model and early-stopping patience. A resumed fold continues from
