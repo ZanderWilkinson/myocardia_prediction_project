@@ -1,0 +1,546 @@
+{
+  "checkpoint": "results/vae_training/mi-vae-z15/val_best.pt",
+  "checkpoint_sha256": "6ebfe6786b474ccf2e0dc3bd6d801fa9572c571b2d2af1ae47ddd32956857ed4",
+  "selected_epoch": 683,
+  "selection_metric": "validation_macro_f1",
+  "experiment_name": "mi-vae-z15",
+  "actual_latent_dim": 8,
+  "model_config": {
+    "n_frames": 10,
+    "n_points": 384,
+    "n_regions": 3,
+    "latent_dim": 8,
+    "width": 384,
+    "heads": 8,
+    "spatial_tokens": 16,
+    "feedforward": 1024,
+    "encoder_depth": 2,
+    "decoder_depth": 1,
+    "demographic_dim": 7,
+    "dropout": 0.1
+  },
+  "preprocess_config": {
+    "n_frames": 10,
+    "n_points": 384,
+    "n_regions": 3,
+    "robust_z": 6.0,
+    "expansion_ratio": 1.75,
+    "spatial_coherence_ratio": 3.0,
+    "cyclic": false,
+    "seed": 42
+  },
+  "input_directory": "data/test_samples_final",
+  "template": "data/prediction_template.csv",
+  "template_sha256": "f36afe3a6204bc22eb675b564682c6b1cd75031af864792aa0bf5ee07b685b13",
+  "classification_threshold": 0.5,
+  "device": "cpu",
+  "n_predictions": 100,
+  "n_excluded": 0,
+  "label_counts": {
+    "pMI": 50,
+    "healthy": 50
+  },
+  "frame_repairs": [
+    {
+      "ID": 900,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 901,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 902,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 903,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 904,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 905,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 906,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 907,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 908,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 909,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 910,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 911,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 912,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 913,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 914,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 915,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 916,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 917,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 918,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 919,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 920,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 921,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 922,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 923,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 924,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 925,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 926,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 927,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 928,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 929,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 930,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 931,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 932,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 933,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 934,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 935,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 936,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 937,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 938,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 939,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 940,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 941,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 942,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 943,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 944,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 945,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 946,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 947,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 948,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 949,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 950,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 951,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 952,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 953,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 954,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 955,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 956,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 957,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 958,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 959,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 960,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 961,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 962,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 963,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 964,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 965,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 966,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 967,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 968,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 969,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 970,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 971,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 972,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 973,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 974,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 975,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 976,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 977,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 978,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 979,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 980,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 981,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 982,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 983,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 984,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 985,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 986,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 987,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 988,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 989,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 990,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 991,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 992,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 993,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 994,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 995,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 996,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 997,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 998,
+      "flagged_frames": [],
+      "replacements": []
+    },
+    {
+      "ID": 999,
+      "flagged_frames": [],
+      "replacements": []
+    }
+  ],
+  "note": "The experiment name contains z15; its saved model configuration specifies latent_dim=8."
+}

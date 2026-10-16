@@ -20,7 +20,7 @@ class VAEConfig:
     encoder_depth: int = 2
     decoder_depth: int = 1
     demographic_dim: int = 7
-    dropout: float = .1
+    dropout: float = .25
 
 
 class AxialBlock(nn.Module):
