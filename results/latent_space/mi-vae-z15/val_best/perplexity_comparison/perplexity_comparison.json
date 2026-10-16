@@ -1,0 +1,99 @@
+{
+  "latent_source": "/Users/thartigan/Documents/Classes/ML/myocardia_prediction_project/results/latent_space/mi-vae-z15/val_best/training_latents.npz",
+  "n_patients": 521,
+  "latent_dim": 8,
+  "perplexities": [
+    5,
+    10,
+    20,
+    30,
+    50,
+    80,
+    120,
+    180,
+    250
+  ],
+  "random_state": 42,
+  "max_iter": 1500,
+  "init": "pca",
+  "learning_rate": "auto",
+  "metric": "euclidean",
+  "latent_scaling": "original trained scale",
+  "labels_used_for_embedding": false,
+  "pca_explained_variance_ratio": [
+    0.9991163611412048,
+    0.0008019114611670375,
+    7.502515654778108e-05,
+    5.678659817931475e-06,
+    7.979107863320678e-07,
+    1.48524136989181e-07,
+    7.335716389889058e-08,
+    0.0
+  ],
+  "results": [
+    {
+      "perplexity": 5,
+      "trustworthiness_10": 0.9990010081047062,
+      "trustworthiness_30": 0.9809219913980839,
+      "kl_divergence": 0.21093477308750153,
+      "iterations": 1499
+    },
+    {
+      "perplexity": 10,
+      "trustworthiness_10": 0.9995314496393795,
+      "trustworthiness_30": 0.9979889842190562,
+      "kl_divergence": 0.18680773675441742,
+      "iterations": 1499
+    },
+    {
+      "perplexity": 20,
+      "trustworthiness_10": 0.9997961008560347,
+      "trustworthiness_30": 0.9990316284908703,
+      "kl_divergence": 0.1651155799627304,
+      "iterations": 1499
+    },
+    {
+      "perplexity": 30,
+      "trustworthiness_10": 0.9998245783901081,
+      "trustworthiness_30": 0.9995614946855281,
+      "kl_divergence": 0.15373626351356506,
+      "iterations": 1499
+    },
+    {
+      "perplexity": 50,
+      "trustworthiness_10": 0.99972699537335,
+      "trustworthiness_30": 0.9997082910335149,
+      "kl_divergence": 0.13338309526443481,
+      "iterations": 1499
+    },
+    {
+      "perplexity": 80,
+      "trustworthiness_10": 0.9992356629854707,
+      "trustworthiness_30": 0.9997673594081861,
+      "kl_divergence": 0.11527561396360397,
+      "iterations": 699
+    },
+    {
+      "perplexity": 120,
+      "trustworthiness_10": 0.998526762237271,
+      "trustworthiness_30": 0.9994087780448637,
+      "kl_divergence": 0.09409255534410477,
+      "iterations": 699
+    },
+    {
+      "perplexity": 180,
+      "trustworthiness_10": 0.9982993216651384,
+      "trustworthiness_30": 0.9970900415967837,
+      "kl_divergence": 0.06710834056138992,
+      "iterations": 699
+    },
+    {
+      "perplexity": 250,
+      "trustworthiness_10": 0.9982154078647355,
+      "trustworthiness_30": 0.9951175077182453,
+      "kl_divergence": 0.0384925976395607,
+      "iterations": 499
+    }
+  ],
+  "notes": "Trustworthiness assesses local-neighbour preservation without class labels. KL divergences at different perplexities are not a common objective for ranking plots."
+}

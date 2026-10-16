@@ -10,7 +10,7 @@ from torch.nn import functional as F
 @dataclass(frozen=True)
 class VAEConfig:
     n_frames: int = 10
-    n_points: int = 384
+    n_points: int = 18000
     n_regions: int = 3
     latent_dim: int = 15
     width: int = 384
@@ -20,7 +20,7 @@ class VAEConfig:
     encoder_depth: int = 2
     decoder_depth: int = 1
     demographic_dim: int = 7
-    dropout: float = .25
+    dropout: float = .1
 
 
 class AxialBlock(nn.Module):

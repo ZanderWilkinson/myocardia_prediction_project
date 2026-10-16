@@ -1,0 +1,67 @@
+{
+  "latent_source": "/Users/thartigan/Documents/Classes/ML/myocardia_prediction_project/results/latent_space/mi-vae-z15/val_best/training_latents.npz",
+  "n_patients": 521,
+  "latent_dim": 8,
+  "perplexities": [
+    1.0,
+    2.0,
+    3.0,
+    4.0,
+    5.0
+  ],
+  "random_state": 42,
+  "max_iter": 1500,
+  "init": "pca",
+  "learning_rate": "auto",
+  "metric": "euclidean",
+  "latent_scaling": "original trained scale",
+  "labels_used_for_embedding": false,
+  "pca_explained_variance_ratio": [
+    0.9991163611412048,
+    0.0008019114611670375,
+    7.502515654778108e-05,
+    5.678659817931475e-06,
+    7.979107863320678e-07,
+    1.48524136989181e-07,
+    7.335716389889058e-08,
+    0.0
+  ],
+  "results": [
+    {
+      "perplexity": 1.0,
+      "trustworthiness_10": 0.6877772525254826,
+      "trustworthiness_30": 0.6308706934075523,
+      "kl_divergence": 0.39019376039505005,
+      "iterations": 1499
+    },
+    {
+      "perplexity": 2.0,
+      "trustworthiness_10": 0.9435708169824826,
+      "trustworthiness_30": 0.7991947056437207,
+      "kl_divergence": 0.27914804220199585,
+      "iterations": 1499
+    },
+    {
+      "perplexity": 3.0,
+      "trustworthiness_10": 0.9897799825717492,
+      "trustworthiness_30": 0.8869847074803571,
+      "kl_divergence": 0.23904411494731903,
+      "iterations": 1499
+    },
+    {
+      "perplexity": 4.0,
+      "trustworthiness_10": 0.9989049438897654,
+      "trustworthiness_30": 0.9543475467450836,
+      "kl_divergence": 0.22378890216350555,
+      "iterations": 1499
+    },
+    {
+      "perplexity": 5.0,
+      "trustworthiness_10": 0.9990010081047062,
+      "trustworthiness_30": 0.9809219913980839,
+      "kl_divergence": 0.21093478798866272,
+      "iterations": 1499
+    }
+  ],
+  "notes": "Trustworthiness assesses local-neighbour preservation without class labels. KL divergences at different perplexities are not a common objective for ranking plots."
+}

@@ -1,0 +1,19 @@
+{
+  "source_coordinates": "/Users/thartigan/Documents/Classes/ML/myocardia_prediction_project/results/latent_space/mi-vae-z15/val_best/low_perplexity_comparison/training_tsne_perplexity_5.csv",
+  "n_patients": 521,
+  "n_markers": 49,
+  "largest_marker_patient_count": 32,
+  "category_counts": {
+    "pMI": 262,
+    "healthy": 259
+  },
+  "perplexity": 5,
+  "single_patient_radius_points": 3.4,
+  "gap_points": 0.8,
+  "figure_size_inches": [
+    12,
+    9
+  ],
+  "grouping_uses_labels": false,
+  "method": "Iteratively merge overlapping display circles; radius scales as sqrt(patient count). Centres are group mean coordinates. Pie angles encode MI category proportions. Original t-SNE coordinates and all patients are retained in patients_by_marker.csv."
+}

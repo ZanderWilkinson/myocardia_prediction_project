@@ -1,0 +1,50 @@
+{
+  "checkpoint": "/Users/thartigan/Documents/Classes/ML/myocardia_prediction_project/results/vae_training/mi-vae-z15/val_best.pt",
+  "checkpoint_sha256": "6ebfe6786b474ccf2e0dc3bd6d801fa9572c571b2d2af1ae47ddd32956857ed4",
+  "checkpoint_epoch": 683,
+  "experiment_name": "mi-vae-z15",
+  "split": "training",
+  "n_patients": 521,
+  "category_counts": {
+    "pMI": 262,
+    "healthy": 259
+  },
+  "latent_dim": 8,
+  "latent_representation": "posterior means, evaluation mode, original trained scale",
+  "labels_used_for_embedding": false,
+  "demographics_in_embedding": false,
+  "perplexity": 30.0,
+  "random_state": 42,
+  "max_iter": 1500,
+  "init": "pca",
+  "learning_rate": "auto",
+  "metric": "euclidean",
+  "kl_divergence": 0.15373626351356506,
+  "iterations": 1499,
+  "device": "cpu",
+  "model_config": {
+    "n_frames": 10,
+    "n_points": 384,
+    "n_regions": 3,
+    "latent_dim": 8,
+    "width": 384,
+    "heads": 8,
+    "spatial_tokens": 16,
+    "feedforward": 1024,
+    "encoder_depth": 2,
+    "decoder_depth": 1,
+    "demographic_dim": 7,
+    "dropout": 0.1
+  },
+  "preprocess_config": {
+    "n_frames": 10,
+    "n_points": 384,
+    "n_regions": 3,
+    "robust_z": 6.0,
+    "expansion_ratio": 1.75,
+    "spatial_coherence_ratio": 3.0,
+    "cyclic": false,
+    "seed": 42
+  },
+  "sklearn_version": "1.9.1"
+}
